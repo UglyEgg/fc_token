@@ -1,0 +1,30 @@
+[project]
+name = "fc-token"
+version = "0.1.3"
+description = "File Centipede activation code helper with KDE/Plasma tray integration"
+readme = "README.md"
+requires-python = ">=3.13"
+
+dependencies = [
+  "PyQt6",
+  "requests",
+]
+
+[project.scripts]
+fc-token = "fc_token.app:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"fc_token" = ["resources/*"]
