@@ -24,6 +24,9 @@ class AppConfig:
     # Default local timezone (used when environment TIMEZONE is not set)
     default_timezone: str = "UTC"
 
+    # Timezone used by the File Centipede activation code page timestamps
+    file_centipede_timezone: str = "Asia/Shanghai"
+
     # Desktop integration / .desktop metadata
     desktop_filename: str = "fc_token.desktop"
     desktop_exec: str = "fc-token"
@@ -55,6 +58,7 @@ FILE_CENTIPEDE_URL = CONFIG.file_centipede_url
 FILE_CENTIPEDE_BUY_URL = CONFIG.file_centipede_buy_url
 DEFAULT_CODES_URL = CONFIG.default_codes_url
 DEFAULT_TIMEZONE = CONFIG.default_timezone
+FILE_CENTIPEDE_TIMEZONE = CONFIG.file_centipede_timezone
 
 # Desktop-related exports
 DESKTOP_FILENAME = CONFIG.desktop_filename
@@ -80,6 +84,7 @@ __all__ = [
     "FILE_CENTIPEDE_BUY_URL",
     "DEFAULT_CODES_URL",
     "DEFAULT_TIMEZONE",
+    "FILE_CENTIPEDE_TIMEZONE",
     "DESKTOP_FILENAME",
     "DESKTOP_EXEC",
     "DESKTOP_ICON_NAME",
