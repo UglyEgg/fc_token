@@ -3,87 +3,115 @@
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime, timezone
-from typing import List
+from datetime import datetime, timezone, tzinfo
+from pathlib import Path
+from typing import Any
 
 from PyQt6.QtCore import QStandardPaths
 
-from .models import CodeEntry
+from .models import CodeEntry, UTC
 from .scraper import fetch_codes
 
 
 class CodeCache:
-    """Manage on-disk cache of activation codes with expiration filtering."""
+    """Manage on-disk cache of activation codes with expiration filtering.
 
-    def __init__(self, app_name: str = "fc_token") -> None:
-        cache_dir = QStandardPaths.writableLocation(
+    All timestamps are stored and compared in UTC.
+    """
+
+    def __init__(self, app_name: str = "fc_token", *, tz: tzinfo = UTC) -> None:
+        self.tz = tz
+
+        cache_root = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.CacheLocation
         )
-        if not cache_dir:
-            cache_dir = os.path.join(os.path.expanduser("~"), ".cache")
-        self.cache_dir = os.path.join(cache_dir, app_name)
-        os.makedirs(self.cache_dir, exist_ok=True)
-        self.cache_path = os.path.join(self.cache_dir, "file_centipede_codes.json")
+        if cache_root:
+            base_path = Path(cache_root)
+        else:
+            # Fallback for environments where QStandardPaths returns an empty string.
+            base_path = Path.home() / ".cache"
 
-    def load(self) -> List[CodeEntry]:
-        if not os.path.exists(self.cache_path):
+        self.cache_dir = base_path / app_name
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self.cache_path = self.cache_dir / "file_centipede_codes.json"
+
+    # --------------------------------------------------------------------- #
+    # Persistence helpers
+    # --------------------------------------------------------------------- #
+
+    def load(self) -> list[CodeEntry]:
+        """Load cached codes from disk.
+
+        Malformed entries are ignored.
+        """
+        if not self.cache_path.exists():
             return []
+
         try:
-            with open(self.cache_path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
+            raw = json.loads(self.cache_path.read_text(encoding="utf-8"))
         except Exception:
             return []
 
-        out: List[CodeEntry] = []
+        codes: list[CodeEntry] = []
         for item in raw:
             if not isinstance(item, dict):
                 continue
             try:
-                start_str = item["start_date"]
-                end_str = item["end_date"]
-                code = str(item["code"])
-                start = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
-                end = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+                codes.append(CodeEntry.from_dict(item, tz=self.tz))
             except Exception:
+                # Ignore malformed entries, keep the rest.
                 continue
-            out.append(CodeEntry(start=start, end=end, code=code))
-        return out
 
-    def save(self, codes: List[CodeEntry]) -> None:
-        data = [
-            {
-                "start_date": c.start_str,
-                "end_date": c.end_str,
-                "code": c.code,
-            }
-            for c in codes
-        ]
+        return codes
+
+    def save(self, codes: list[CodeEntry]) -> None:
+        """Persist codes to disk in JSON format."""
+        data = [c.to_dict() for c in codes]
         try:
-            with open(self.cache_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            self.cache_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:
+            # Best-effort persistence; ignore IO errors.
             pass
 
     def purge(self) -> None:
+        """Delete the cache file from disk."""
         try:
-            if os.path.exists(self.cache_path):
-                os.remove(self.cache_path)
+            if self.cache_path.exists():
+                self.cache_path.unlink()
         except Exception:
+            # Ignore failures; cache will simply be considered empty.
             pass
 
-    def refresh(self, url: str) -> List[CodeEntry]:
-        """Fetch new codes, merge with cache, drop expired entries, save and return."""
-        existing = {c.start_str: c for c in self.load()}
+    # --------------------------------------------------------------------- #
+    # Refresh logic
+    # --------------------------------------------------------------------- #
+
+    def refresh(self, url: str) -> list[CodeEntry]:
+        """Fetch new codes, merge with cache, drop expired entries, save and return.
+
+        - Existing cached codes are loaded.
+        - Fresh codes from the remote URL are fetched and merged by `start_str`.
+        - Codes whose `end` timestamp is earlier than "now" in `self.tz`
+          are discarded.
+        """
+        # Index existing codes by their canonical start timestamp string.
+        existing: dict[str, CodeEntry] = {c.start_str: c for c in self.load()}
+
         try:
             fresh = fetch_codes(url)
         except Exception:
+            # Network / parsing errors -> treat as "no new codes".
             fresh = []
+
         for entry in fresh:
             existing[entry.start_str] = entry
 
-        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        now_utc = datetime.now(self.tz)
         active = [c for c in existing.values() if c.end >= now_utc]
+
+        # Keep entries ordered by start time for predictable behavior.
         active.sort(key=lambda c: c.start)
+
         self.save(active)
         return active

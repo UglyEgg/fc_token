@@ -16,19 +16,16 @@ the 'fc-token' console script is on PATH, e.g.:
     # or
     pip install .
 
-Usage examples (from repo root):
+Usage examples:
 
-    # Install for current user
-    python installer.py install --user
+    # Install launcher/icons for current user
+    python -m fc_token.installer install --user
 
-    # Uninstall for current user
-    python installer.py uninstall --user
+    # Install launcher/icons system-wide (requires sudo)
+    sudo python -m fc_token.installer install --system
 
-    # Install system-wide (needs sudo)
-    sudo python installer.py install --system
-
-    # Install system-wide under /usr (instead of /usr/local)
-    sudo python installer.py install --system --prefix /usr
+    # Uninstall from user-local location
+    python -m fc_token.installer uninstall --user
 """
 
 from __future__ import annotations
@@ -36,183 +33,186 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
+
+from importlib.resources import files
+
+from fc_token.config import APP_NAME
 
 
-REPO_ROOT = Path(__file__).resolve().parent
-RESOURCES_DIR = REPO_ROOT / "src" / "fc_token" / "resources"
+DESKTOP_FILENAME = "fc_token.desktop"
+ICON_PNG_NAME = "fc_token.png"
+ICON_SYMBOLIC_NAME = "fc_token_symbolic.svg"
 
-
-def get_paths(system: bool, prefix: str | None) -> dict[str, Path]:
-    if system:
-        base_prefix = Path(prefix or "/usr/local")
-        share = base_prefix / "share"
-    else:
-        data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
-        share = Path(data_home)
-
-    apps_dir = share / "applications"
-    icons_base = share / "icons" / "hicolor"
-
-    return {
-        "apps_dir": apps_dir,
-        "icons_base": icons_base,
-        "tray_symbolic_svg": icons_base / "scalable" / "apps" / "fc_token-symbolic.svg",
-        "icon_256": icons_base / "256x256" / "apps" / "fc_token.png",
-        "desktop": apps_dir / "fc_token.desktop",
-        "share_root": share,
-    }
-
-
-def install(args: argparse.Namespace) -> int:
-    paths = get_paths(system=args.system, prefix=args.prefix)
-
-    apps_dir = paths["apps_dir"]
-    icons_base = paths["icons_base"]
-    tray_symbolic_svg = paths["tray_symbolic_svg"]
-    icon_256 = paths["icon_256"]
-    desktop_path = paths["desktop"]
-
-    # Create directories
-    (icons_base / "scalable" / "apps").mkdir(parents=True, exist_ok=True)
-    (icons_base / "256x256" / "apps").mkdir(parents=True, exist_ok=True)
-    apps_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy icons from resources
-    app_png = RESOURCES_DIR / "fc_token.png"
-    tray_svg = RESOURCES_DIR / "fc_token_symbolic.svg"
-
-    if app_png.exists():
-        shutil.copyfile(app_png, icon_256)
-        print(f"Installed app PNG icon -> {icon_256}")
-    else:
-        print("Warning: fc_token.png not found in resources/")
-
-    if tray_svg.exists():
-        shutil.copyfile(tray_svg, tray_symbolic_svg)
-        print(f"Installed tray SVG icon -> {tray_symbolic_svg}")
-    else:
-        print("Warning: fc_token_symbolic.svg not found in resources/")
-
-    # .desktop file
-    desktop_content = """[Desktop Entry]
+DESKTOP_TEMPLATE = f"""[Desktop Entry]
 Type=Application
-Name=File Centipede Activation Helper
-GenericName=Activation Code Helper
-Comment=Fetch and manage File Centipede activation codes
+Name={APP_NAME}
+Comment=File Centipede activation helper
 Exec=fc-token
 Icon=fc_token
 Terminal=false
-Categories=Network;Qt;Utility;
-StartupNotify=true
-StartupWMClass=File Centipede Activation Codes
+Categories=Network;Utility;
+StartupNotify=false
 """
 
-    desktop_path.write_text(desktop_content, encoding="utf-8")
-    print(f"Installed desktop file -> {desktop_path}")
 
-    # Try to refresh desktop / icon databases (ignore failures)
-    for cmd in (
-        ["update-desktop-database", str(apps_dir)],
-        ["gtk-update-icon-theme", str(paths["share_root"] / "icons")],
-    ):
-        try:
-            subprocess.run(
-                cmd,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+@dataclass(frozen=True, slots=True)
+class InstallTarget:
+    """Target base for installing desktop file and icons."""
 
-    print(
-        "\nDone. Make sure 'fc-token' is on your PATH "
-        "(e.g. via 'uv tool install .' or 'pipx install .')."
-    )
-    return 0
+    prefix: Path  # e.g. ~/.local/share or /usr/local/share
+
+    @property
+    def applications_dir(self) -> Path:
+        return self.prefix / "applications"
+
+    @property
+    def icons_dir(self) -> Path:
+        return self.prefix / "icons" / "hicolor"
+
+    @property
+    def png_target(self) -> Path:
+        # 256x256 pixel icon
+        return self.icons_dir / "256x256" / "apps" / "fc_token.png"
+
+    @property
+    def symbolic_target(self) -> Path:
+        # Scalable symbolic icon
+        return self.icons_dir / "scalable" / "apps" / "fc_token-symbolic.svg"
+
+    @property
+    def desktop_target(self) -> Path:
+        return self.applications_dir / DESKTOP_FILENAME
 
 
-def uninstall(args: argparse.Namespace) -> int:
-    paths = get_paths(system=args.system, prefix=args.prefix)
+def find_resource(name: str) -> Path:
+    """Return a path to a resource file packaged with fc_token."""
+    try:
+        pkg_root = files("fc_token.resources")
+        candidate = pkg_root.joinpath(name)
+        if candidate.is_file():
+            return Path(candidate)
+    except Exception as e:  # pragma: no cover - very unlikely
+        raise FileNotFoundError(f"Could not locate resource {name}: {e}") from e
+    raise FileNotFoundError(f"Resource not found: {name}")
 
-    to_remove = [
-        paths["desktop"],
-        paths["tray_symbolic_svg"],
-        paths["icon_256"],
-    ]
 
+def write_text_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def copy_file(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+
+
+def install_launcher(target: InstallTarget) -> None:
+    """Install the .desktop file and icons into the given target."""
+    print(f"[fc-token] Installing desktop file into {target.applications_dir}")
+    write_text_file(target.desktop_target, DESKTOP_TEMPLATE)
+
+    print(f"[fc-token] Installing icons into {target.icons_dir}")
+    png_src = find_resource(ICON_PNG_NAME)
+    svg_src = find_resource(ICON_SYMBOLIC_NAME)
+
+    copy_file(png_src, target.png_target)
+    copy_file(svg_src, target.symbolic_target)
+
+    print("[fc-token] Installation complete.")
+
+
+def uninstall_launcher(target: InstallTarget) -> None:
+    """Remove the .desktop file and icons from the given target."""
     removed_any = False
-    for p in to_remove:
-        try:
-            if p.exists():
-                p.unlink()
-                print(f"Removed {p}")
+    for path in [
+        target.desktop_target,
+        target.png_target,
+        target.symbolic_target,
+    ]:
+        if path.exists():
+            print(f"[fc-token] Removing {path}")
+            try:
+                path.unlink()
                 removed_any = True
-        except Exception as e:
-            print(f"Warning: failed to remove {p}: {e}")
+            except Exception as e:
+                print(f"[fc-token] Failed to remove {path}: {e}", file=sys.stderr)
 
     if not removed_any:
-        print("Nothing to remove; no installed launcher/icons found for this scope.")
+        print("[fc-token] Nothing to remove for this target.")
     else:
-        print("Uninstall completed for launcher/icons (Python package removal is separate).")
-
-    return 0
+        print("[fc-token] Uninstall complete for this target.")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Install or uninstall fc-token launcher and icons."
+        description="Install or uninstall the fc-token desktop launcher and icons."
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    def add_common_flags(p):
+    def add_common_install_args(p: argparse.ArgumentParser) -> None:
         scope = p.add_mutually_exclusive_group()
         scope.add_argument(
             "--user",
             action="store_true",
-            default=False,
-            help="Install/uninstall for current user (default).",
+            help="Install into the current user's ~/.local/share (default).",
         )
         scope.add_argument(
             "--system",
             action="store_true",
-            default=False,
-            help="Install/uninstall system-wide (e.g. /usr/local/share). Requires sudo.",
+            help="Install into a system prefix (requires appropriate permissions).",
         )
         p.add_argument(
             "--prefix",
             type=str,
-            help="Custom prefix for system install (default: /usr/local). Only used with --system.",
+            default="/usr/local/share",
+            help="Base prefix for system-wide installation (default: /usr/local/share). "
+            "Ignored when --user is given.",
         )
 
-    p_install = subparsers.add_parser("install", help="Install launcher and icons.")
-    add_common_flags(p_install)
+    install_parser = subparsers.add_parser(
+        "install", help="Install launcher and icons."
+    )
+    add_common_install_args(install_parser)
 
-    p_uninstall = subparsers.add_parser("uninstall", help="Uninstall launcher and icons.")
-    add_common_flags(p_uninstall)
+    uninstall_parser = subparsers.add_parser(
+        "uninstall", help="Uninstall launcher and icons."
+    )
+    add_common_install_args(uninstall_parser)
 
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
 
-    # default scope -> user
-    if not args.user and not args.system:
-        args.user = True
 
-    return args
+def target_from_args(args: argparse.Namespace) -> InstallTarget:
+    if args.user or not args.system:
+        # Default: user-local
+        base = (
+            Path(os.environ.get("XDG_DATA_HOME", ""))
+            or Path.home() / ".local" / "share"
+        )
+        return InstallTarget(prefix=base)
+
+    # System-wide install
+    base = Path(args.prefix)
+    return InstallTarget(prefix=base)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    target = target_from_args(args)
 
     if args.command == "install":
-        return install(args)
+        install_launcher(target)
+        return 0
     elif args.command == "uninstall":
-        return uninstall(args)
-    else:
-        print(f"Unknown command: {args.command}")
+        uninstall_launcher(target)
+        return 0
+    else:  # pragma: no cover - argparse enforces choices
+        print(f"Unknown command: {args.command}", file=sys.stderr)
         return 1
 
 

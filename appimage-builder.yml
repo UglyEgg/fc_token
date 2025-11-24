@@ -8,100 +8,80 @@ AppDir:
     name: File Centipede Activation Helper
     icon: fc_token
     version: 0.1.3
-    exec: AppRun
+    # We run the console script installed into the venv.
+    exec: usr/venv/bin/fc-token
     exec_args: $@
 
   runtime:
     env:
+      # Make sure the venv binaries are found first.
       PATH: "$APPDIR/usr/venv/bin:$PATH"
-      PYTHONHOME: ""
-      PYTHONPATH: ""
-      QT_QPA_PLATFORM: "xcb"
+      # Make Qt behave nicely in some desktop environments.
+      QT_QPA_PLATFORMTHEME: "qt6ct"
 
+  # Base system dependencies to pull in via apt.
+  # Tune distro / versions as needed for your build host.
   apt:
     arch: amd64
     sources:
-      - sourceline: "deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main universe"
+      - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy main universe"
+      - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy-updates main universe"
     include:
       - python3
       - python3-venv
       - python3-pip
-      - libxcb1
+      - python3-distutils
+      - python3-pyqt6
+      - libgl1
       - libx11-6
       - libxext6
       - libxrender1
+      - libxcb1
+      - libxkbcommon0
+      - libdbus-1-3
       - libglib2.0-0
-      - libfontconfig1
-      - libfreetype6
-      - libx11-xcb1
-      - libxcb-render0
-      - libxcb-shape0
-      - libxcb-xfixes0
+      - ca-certificates
+    exclude:
+      - "*-dev"
+      - "*-dbg"
 
   files:
     include:
-      - .: opt/fc-token-src
-      - src/fc_token/resources/fc_token.png: usr/share/icons/hicolor/256x256/apps/fc_token.png
-      - src/fc_token/resources/fc_token_symbolic.svg: usr/share/icons/hicolor/scalable/apps/fc_token-symbolic.svg
-
+      # Python + Qt libraries brought in by apt above.
+      - /usr/bin/python3
+      - /usr/lib/x86_64-linux-gnu
+      - /usr/lib/python3
+      - /usr/share/icons
+      - /usr/share/qt6
     exclude:
-      - usr/share/doc
-      - usr/share/man
-      - usr/share/locale/*/LC_MESSAGES/*
-      - usr/share/icons/hicolor/*/*@2x
-      - usr/lib/python3*/test
-      - usr/lib/python3*/dist-packages/pip/_vendor
-      - opt/fc-token-src/.git
-      - opt/fc-token-src/tests
-      - opt/fc-token-src/.venv
+      - /usr/share/doc
+      - /usr/share/man
+      - /usr/share/locale/*
+      - /usr/share/icons/Adwaita
 
-  script: |
-    set -e
-    echo "[appimage-builder] Creating Python venv inside AppDir..."
-    cd "$APPDIR"
-
-    python3 -m venv usr/venv
-
-    echo "[appimage-builder] Installing fc-token into venv..."
-    usr/venv/bin/pip install --no-cache-dir --upgrade pip
-    usr/venv/bin/pip install --no-cache-dir ./opt/fc-token-src
-
-    echo "[appimage-builder] Creating AppRun and desktop file..."
-
-    cat > AppRun << 'EOF'
-    #!/bin/sh
-    HERE="$(dirname "$(readlink -f "$0")")"
-    export PATH="$HERE/usr/venv/bin:$PATH"
-    export PYTHONHOME=""
-    export PYTHONPATH=""
-    exec "$HERE/usr/venv/bin/fc-token" "$@"
-    EOF
-    chmod +x AppRun
-
-    mkdir -p usr/share/applications
-    cat > usr/share/applications/fc-token.desktop << 'EOF'
-    [Desktop Entry]
-    Type=Application
-    Name=File Centipede Activation Helper
-    GenericName=Activation Code Helper
-    Comment=Fetch and manage File Centipede activation codes
-    Exec=fc-token
-    Icon=fc_token
-    Terminal=false
-    Categories=Network;Qt;Utility;
-    EOF
+  # Build script: create a venv inside the AppDir and install this project.
+  script:
+    - |
+      set -e
+      echo "[fc-token] Creating virtualenv under AppDir/usr/venv"
+      python3 -m venv "$APPDIR/usr/venv"
+      "$APPDIR/usr/venv/bin/pip" install --upgrade pip wheel
+      echo "[fc-token] Installing project into venv"
+      "$APPDIR/usr/venv/bin/pip" install .
 
 AppImage:
   arch: x86_64
+
+  # Fill this in if you later want zsync-based updates.
   update-information: ""
   sign-key: null
 
   test:
     - path: AppDir
-      command: ./AppRun --version
+      command: usr/venv/bin/fc-token --version
       env:
         QT_QPA_PLATFORM: "offscreen"
     - path: AppDir
-      command: ./AppRun --self-test
+      command: usr/venv/bin/fc-token --self-test
       env:
         QT_QPA_PLATFORM: "offscreen"
