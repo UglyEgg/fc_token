@@ -1,3 +1,5 @@
+# fc_token/ui/dialogs/settings.py
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -81,9 +83,9 @@ class SettingsDialog(QDialog):
         icon_group = QGroupBox("Tray icon theme")
         icon_layout = QVBoxLayout(icon_group)
 
-        self.radio_icon_auto = QRadioButton("Auto (system theme)")
-        self.radio_icon_light = QRadioButton("Light icon")
-        self.radio_icon_dark = QRadioButton("Dark icon")
+        self.radio_icon_auto = QRadioButton("Follow system theme")
+        self.radio_icon_light = QRadioButton("Light tray icon")
+        self.radio_icon_dark = QRadioButton("Dark tray icon")
 
         icon_mode = tray.icon_mode
         if icon_mode == "light":
@@ -105,7 +107,15 @@ class SettingsDialog(QDialog):
         integration_group = QGroupBox("Integration && UI")
         integration_layout = QVBoxLayout(integration_group)
 
-        # Autostart
+        # Desktop integration checkbox
+        self._initial_desktop_integrated = getattr(
+            tray, "is_desktop_integrated", lambda: False
+        )()
+        self.chk_integrate_desktop = QCheckBox("Integrate with desktop")
+        self.chk_integrate_desktop.setChecked(self._initial_desktop_integrated)
+        integration_layout.addWidget(self.chk_integrate_desktop)
+
+        # Start on login
         self.chk_autostart = QCheckBox("Start on login")
         self.chk_autostart.setChecked(tray.is_autostart_enabled())
         integration_layout.addWidget(self.chk_autostart)
@@ -123,11 +133,6 @@ class SettingsDialog(QDialog):
         self.chk_show_menu_info = QCheckBox("Show status submenu in tray menu")
         self.chk_show_menu_info.setChecked(tray.show_menu_info)
         integration_layout.addWidget(self.chk_show_menu_info)
-
-        # Uninstall integration
-        self.btn_uninstall = QPushButton("Remove launcher & tray icons…")
-        self.btn_uninstall.clicked.connect(self._on_uninstall_clicked)
-        integration_layout.addWidget(self.btn_uninstall)
 
         main_layout.addWidget(integration_group)
 
@@ -159,7 +164,7 @@ class SettingsDialog(QDialog):
         self.setLayout(main_layout)
 
         # Comfortable default size
-        self.resize(640, 540)
+        self.resize(700, 722)
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -173,9 +178,6 @@ class SettingsDialog(QDialog):
         # Delegate to tray's existing logic
         self.tray.change_timezone()
         self._update_timezone_label()
-
-    def _on_uninstall_clicked(self) -> None:
-        self.tray.uninstall_integration()
 
     def _on_clear_cache_clicked(self) -> None:
         """Advanced: clear activation cache with explanatory confirmation."""
@@ -223,14 +225,13 @@ class SettingsDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(
                 self,
-                "Error",
-                f"Failed to clear activation cache:\n{exc}",
+                "Error clearing cache",
+                f"An error occurred while clearing the cache:\n{exc}",
             )
 
     def _apply_and_close(self) -> None:
-        # Refresh group
-        auto_refresh_enabled = self.chk_auto_refresh.isChecked()
-        self.tray.toggle_auto_refresh(auto_refresh_enabled)
+        # Refresh: auto-refresh flag
+        self.tray.toggle_auto_refresh(self.chk_auto_refresh.isChecked())
 
         # Time & appearance: icon mode
         if self.radio_icon_light.isChecked():
@@ -240,7 +241,13 @@ class SettingsDialog(QDialog):
         else:
             self.tray.set_icon_mode("auto")
 
-        # Integration & UI
+        # Integration & UI: desktop integration
+        new_integrated = self.chk_integrate_desktop.isChecked()
+        if new_integrated != self._initial_desktop_integrated:
+            # Only perform install/uninstall if the state actually changed
+            self.tray.set_desktop_integration_enabled(new_integrated)
+
+        # Start on login
         autostart_enabled = self.chk_autostart.isChecked()
         self.tray.set_autostart_enabled(autostart_enabled)
 

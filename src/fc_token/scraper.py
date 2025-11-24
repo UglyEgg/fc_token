@@ -1,10 +1,17 @@
-"""Scraping and parsing File Centipede activation codes."""
+"""Scraping and parsing File Centipede activation codes.
+
+Refactored to:
+- Keep the original parsing logic and UTC semantics.
+- Use a small pool of realistic browser User-Agent strings for requests.
+- Optionally reuse a module-level `requests.Session` for connection reuse.
+"""
 
 from __future__ import annotations
 
+import random
 import re
 from datetime import datetime, tzinfo
-from typing import Any
+from typing import Any, List
 
 import requests
 
@@ -22,6 +29,50 @@ DATE_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
 )
 
+# Small pool of realistic desktop browser User-Agent strings.
+USER_AGENTS: List[str] = [
+    # Chrome, Linux
+    (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    # Chrome, Windows
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    # Firefox, Linux
+    (
+        "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) "
+        "Gecko/20100101 Firefox/125.0"
+    ),
+    # Firefox, Windows
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
+        "Gecko/20100101 Firefox/125.0"
+    ),
+    # Edge, Windows
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
+    ),
+]
+
+
+def _get_random_user_agent() -> str:
+    """Return a random realistic browser User-Agent string."""
+    return random.choice(USER_AGENTS)
+
+
+# Optional module-level session for connection reuse.
+_SESSION = requests.Session()
+_SESSION.headers.update(
+    {
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+)
+
 
 def clean_token(raw: str) -> str:
     """Extract the actual activation token from a noisy string.
@@ -35,9 +86,11 @@ def clean_token(raw: str) -> str:
 
 
 def _parse_datetime(value: str, *, tz: tzinfo = UTC) -> datetime:
-    """Parse a timestamp string from the page into an aware UTC datetime."""
+    """Parse a timestamp string from the page into an aware UTC datetime.
+
+    The source timestamps are treated as UTC.
+    """
     dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-    # The source timestamps are treated as UTC.
     return dt.replace(tzinfo=tz)
 
 
@@ -110,7 +163,8 @@ def fetch_codes(url: str = DEFAULT_CODES_URL, *, tz: tzinfo = UTC) -> list[CodeE
     Raises:
         requests.RequestException: if the HTTP request fails.
     """
-    resp = requests.get(url, timeout=15)
+    headers = {"User-Agent": _get_random_user_agent()}
+    resp = _SESSION.get(url, headers=headers, timeout=15)
     resp.raise_for_status()
     return parse_codes(resp.text, tz=tz)
 

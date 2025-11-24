@@ -15,7 +15,12 @@ from fc_token.ui.tray import TrayController
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Application entry point."""
+    """Application entry point.
+
+    Refactored to honour the "open main window on start" preference stored
+    in QSettings (via TrayController.open_on_start), while keeping the
+    ``--version`` and ``--self-test`` behaviours intact.
+    """
     if argv is None:
         argv = sys.argv
 
@@ -24,6 +29,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{APP_NAME} {APP_VERSION}")
         return 0
 
+    # Lightweight self-test path: create the app, main window, and tray,
+    # run a single initial load, then exit without entering the full event loop.
     if "--self-test" in argv:
         try:
             app = QApplication(list(argv))
@@ -40,11 +47,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             tray = TrayController(win, cache)
             win.set_tray_controller(tray)
 
-            # Self-test is a headless smoke test; keep the window hidden.
+            # For self-test, we don't need to show the main window.
             win.hide()
             tray.initial_load()
             return 0
-        except Exception as e:
+        except Exception as e:  # pragma: no cover - defensive
             print(f"fc-token self-test failed: {e}", file=sys.stderr)
             return 1
 
@@ -63,9 +70,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     tray = TrayController(win, cache)
     win.set_tray_controller(tray)
 
-    # Respect the "Open main window on start" setting.
-    # Default: True (show window if setting doesn't exist yet).
-    if getattr(tray, "open_on_start", True):
+    # Honour the user's "open main window on start" preference.
+    if tray.open_on_start:
         win.show()
     else:
         win.hide()

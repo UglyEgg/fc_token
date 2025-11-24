@@ -11,7 +11,7 @@ class AppConfig:
 
     # User-facing metadata
     app_name: str = "File Centipede Activation Helper"
-    version: str = "0.1.5"
+    version: str = "0.2.0"
 
     # URLs
     file_centipede_url: str = "https://filecxx.com/"
@@ -23,6 +23,14 @@ class AppConfig:
 
     # Default local timezone (used when environment TIMEZONE is not set)
     default_timezone: str = "UTC"
+
+    # Desktop integration / .desktop metadata
+    desktop_filename: str = "fc_token.desktop"
+    desktop_exec: str = "fc-token"
+    desktop_icon_name: str = "fc_token"
+    desktop_comment: str = "File Centipede activation helper"
+    desktop_categories: str = "Network;Utility;"
+    desktop_startup_notify: bool = False
 
     # QSettings keys / namespaces
     settings_org: str = "fc_token"
@@ -48,6 +56,14 @@ FILE_CENTIPEDE_BUY_URL = CONFIG.file_centipede_buy_url
 DEFAULT_CODES_URL = CONFIG.default_codes_url
 DEFAULT_TIMEZONE = CONFIG.default_timezone
 
+# Desktop-related exports
+DESKTOP_FILENAME = CONFIG.desktop_filename
+DESKTOP_EXEC = CONFIG.desktop_exec
+DESKTOP_ICON_NAME = CONFIG.desktop_icon_name
+DESKTOP_COMMENT = CONFIG.desktop_comment
+DESKTOP_CATEGORIES = CONFIG.desktop_categories
+DESKTOP_STARTUP_NOTIFY = CONFIG.desktop_startup_notify
+
 SETTINGS_ORG = CONFIG.settings_org
 SETTINGS_APP = CONFIG.settings_app
 
@@ -64,6 +80,12 @@ __all__ = [
     "FILE_CENTIPEDE_BUY_URL",
     "DEFAULT_CODES_URL",
     "DEFAULT_TIMEZONE",
+    "DESKTOP_FILENAME",
+    "DESKTOP_EXEC",
+    "DESKTOP_ICON_NAME",
+    "DESKTOP_COMMENT",
+    "DESKTOP_CATEGORIES",
+    "DESKTOP_STARTUP_NOTIFY",
     "SETTINGS_ORG",
     "SETTINGS_APP",
     "KEY_REFRESH_INTERVAL",

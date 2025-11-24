@@ -17,6 +17,10 @@ from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PyQt6.QtWidgets import QApplication
 
+# Module-level icon caches to avoid repeated lookups and disk reads.
+_APP_ICON: QIcon | None = None
+_TRAY_BASE_ICON: QIcon | None = None
+
 
 # ---------------------------------------------------------------------------
 # Resource loading
@@ -79,22 +83,37 @@ def load_app_icon() -> QIcon:
         1. Theme icon “fc_token”
         2. Packaged resource “fc_token.png”
         3. Empty icon
+
+    The result is cached for the lifetime of the process to avoid repeated
+    theme lookups and disk reads.
     """
-    return _load_icon_with_fallbacks(
+    global _APP_ICON
+    if _APP_ICON is not None and not _APP_ICON.isNull():
+        return _APP_ICON
+
+    icon = _load_icon_with_fallbacks(
         theme_names=["fc_token"],
         resource_name="fc_token.png",
     )
+    _APP_ICON = icon
+    return icon
 
 
 def load_tray_base_icon() -> QIcon:
-    """Load the base tray icon (monochrome duck).
+    """Load the base monochrome tray icon used for the tray.
 
     Priority:
         1. Theme icon “fc_token-symbolic”
         2. Theme icon “fc_token”
         3. Bundled SVG “fc_token_symbolic.svg”
         4. Fallback to application icon
+
+    The result is cached for the lifetime of the process.
     """
+    global _TRAY_BASE_ICON
+    if _TRAY_BASE_ICON is not None and not _TRAY_BASE_ICON.isNull():
+        return _TRAY_BASE_ICON
+
     icon = _load_icon_with_fallbacks(
         theme_names=[
             "fc_token-symbolic",
@@ -103,8 +122,12 @@ def load_tray_base_icon() -> QIcon:
         resource_name="fc_token_symbolic.svg",
     )
     if not icon.isNull():
+        _TRAY_BASE_ICON = icon
         return icon
-    return load_app_icon()
+
+    fallback = load_app_icon()
+    _TRAY_BASE_ICON = fallback
+    return fallback
 
 
 # ---------------------------------------------------------------------------

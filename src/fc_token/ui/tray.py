@@ -1,12 +1,21 @@
+# fc_token/ui/tray.py
+
 from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
+from importlib.resources import files
 
-from PyQt6.QtCore import QSettings, QTimer
-from PyQt6.QtGui import QAction, QColor, QIcon
-from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PyQt6.QtCore import QSettings, QTimer, QThread
+from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtWidgets import (
+    QApplication,
+    QMenu,
+    QSystemTrayIcon,
+    QMessageBox,
+)
 
 from fc_token.cache import CodeCache
 from fc_token.config import (
@@ -17,7 +26,9 @@ from fc_token.config import (
     SETTINGS_APP,
     SETTINGS_ORG,
     DEFAULT_TIMEZONE,
+    DESKTOP_FILENAME,
 )
+from fc_token.desktop_entry import build_autostart_desktop, build_launcher_desktop
 from fc_token.icons import (
     create_attention_icon,
     is_dark_theme,
@@ -27,8 +38,9 @@ from fc_token.icons import (
 )
 from fc_token.ui.dialogs.about import show_about_dialog
 from fc_token.ui.dialogs.timezone import run_timezone_dialog
+from fc_token.ui.dialogs.settings import run_settings_dialog
 from fc_token.ui.utils import get_local_zone_name, get_local_zone
-
+from fc_token.ui.workers import RefreshWorker
 
 # Minimum allowed refresh interval (minutes) between *online* scrapes.
 # Global anti-abuse floor: 6 hours.
@@ -37,9 +49,18 @@ MIN_REFRESH_MINUTES = 360
 # Auto-refresh schedule: once per day (used for the timer / "Next" info).
 AUTO_REFRESH_MINUTES = 24 * 60
 
+# Resource filenames packaged under fc_token/resources
+ICON_PNG_NAME = "fc_token.png"
+ICON_SYMBOLIC_NAME = "fc_token_symbolic.svg"
+
 
 class TrayController:
-    """System tray integration, scheduling, and notifications."""
+    """System tray integration, scheduling, and notifications.
+
+    Network scraping and cache refreshes run in a background thread via
+    :class:`RefreshWorker`, keeping the GUI thread responsive even during slow
+    or failing network requests.
+    """
 
     def __init__(self, window, cache: CodeCache) -> None:
         self.window = window
@@ -55,8 +76,7 @@ class TrayController:
             KEY_AUTO_REFRESH, True, type=bool
         )
 
-        # Whether the main window should be shown when the app starts.
-        # Default: True (show on start).
+        # Whether to open the main window on start
         self.open_on_start: bool = self.settings.value("open_on_start", True, type=bool)
 
         # Next scheduled *auto* refresh (UTC)
@@ -71,8 +91,6 @@ class TrayController:
         )
 
         # UI visibility prefs
-        # show_tooltip: whether tray tooltip shows the detailed status block
-        # show_menu_info: whether "Status…" submenu appears in tray menu
         self.show_tooltip: bool = self.settings.value("show_tooltip", True, type=bool)
         self.show_menu_info: bool = self.settings.value(
             "show_menu_info", True, type=bool
@@ -91,6 +109,11 @@ class TrayController:
         else:
             self.last_refresh_utc = None
 
+        # Timezone cache (for frequent status updates)
+        self._tz_name_cache: str = ""
+        self._tzinfo_cache = timezone.utc
+        self._refresh_timezone_cache()
+
         # Timers
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self._on_refresh_timer)
@@ -104,6 +127,13 @@ class TrayController:
         self._setup_menu()
 
         self.tray_icon.activated.connect(self.on_tray_activated)
+
+        # Background-refresh state
+        self._refresh_thread: QThread | None = None
+        self._refresh_worker: RefreshWorker | None = None
+        self._refresh_in_progress: bool = False
+        self._current_refresh_initial: bool = False
+        self._current_refresh_use_network: bool = False
 
         # Start timers according to current settings
         self.update_timer()
@@ -121,12 +151,14 @@ class TrayController:
         Respects offline-first rules and minimum scrape interval.
         """
         use_network = self._should_refresh_with_network()
-        changed = self.window.refresh_codes(initial=True, use_network=use_network)
+
         if use_network:
-            self._update_last_refresh()
-        if changed:
-            self._on_code_changed()
-        self.update_refresh_ui()
+            self._start_refresh_task(initial=True, use_network=True)
+        else:
+            changed = self.window.refresh_from_cache(initial=True)
+            if changed:
+                self._on_code_changed()
+            self.update_refresh_ui()
 
     # ------------------------------------------------------------------ #
     # Tray icon, menu, and theme
@@ -223,9 +255,7 @@ class TrayController:
         self.tray_icon.setContextMenu(tray_menu)
 
     def open_settings(self) -> None:
-        """Open the unified Settings dialog (lazy import to avoid cycles)."""
-        from fc_token.ui.dialogs.settings import run_settings_dialog
-
+        """Open the unified Settings dialog."""
         run_settings_dialog(self.window, self)
 
     def set_icon_mode(self, mode: str) -> None:
@@ -258,7 +288,7 @@ class TrayController:
             self.tray_icon.setIcon(icon)
 
     # ------------------------------------------------------------------ #
-    # User-visible notifications
+    # User-visible notifications & tray interactions
     # ------------------------------------------------------------------ #
 
     def show_info_message(self, title: str, text: str, msec: int = 3000) -> None:
@@ -274,10 +304,6 @@ class TrayController:
         """Clear the 'new code' attention dot on the tray icon."""
         self.unseen_change = False
         self.update_tray_icon()
-
-    # ------------------------------------------------------------------ #
-    # Tray interactions
-    # ------------------------------------------------------------------ #
 
     def is_tray_visible(self) -> bool:
         return self.tray_icon.isVisible()
@@ -312,8 +338,13 @@ class TrayController:
                 self.show_normal_from_tray()
 
     def quit_from_tray(self) -> None:
+        # Stop periodic timers
         self.refresh_timer.stop()
         self.countdown_timer.stop()
+
+        # Ensure any background refresh completes cleanly
+        self._cancel_refresh_thread()
+
         QApplication.instance().quit()
 
     # ------------------------------------------------------------------ #
@@ -381,7 +412,7 @@ class TrayController:
         - First run (no last_refresh_utc): allow exactly one initial scrape.
         """
         now_utc = datetime.now(timezone.utc)
-        codes = self.cache.load()
+        codes = self.cache.get_codes()
 
         # First-ever run: no last_refresh_utc recorded → allow one scrape.
         if self.last_refresh_utc is None:
@@ -425,24 +456,21 @@ class TrayController:
 
     def _on_refresh_timer(self) -> None:
         use_network = self._should_refresh_with_network()
-        changed = self.window.refresh_codes(initial=False, use_network=use_network)
         if use_network:
-            self._update_last_refresh()
-        if changed:
-            self._on_code_changed()
-
-        if self.auto_refresh_enabled:
-            now_utc = datetime.now(timezone.utc)
-            self.next_refresh_deadline = now_utc + timedelta(
-                minutes=AUTO_REFRESH_MINUTES
-            )
-
-        self.update_refresh_ui()
+            self._start_refresh_task(initial=False, use_network=True)
+        else:
+            changed = self.window.refresh_from_cache(initial=False)
+            if changed:
+                self._on_code_changed()
+            if self.auto_refresh_enabled:
+                now_utc = datetime.now(timezone.utc)
+                self.next_refresh_deadline = now_utc + timedelta(
+                    minutes=AUTO_REFRESH_MINUTES
+                )
+            self.update_refresh_ui()
 
     def _show_refresh_delay_info(self) -> None:
         """Show an info box explaining when an online refresh is allowed (floor)."""
-        from PyQt6.QtWidgets import QMessageBox as MB
-
         next_allowed_utc, remaining_sec = self.get_next_allowed_refresh_info()
 
         if not next_allowed_utc or remaining_sec is None or remaining_sec <= 0:
@@ -452,7 +480,7 @@ class TrayController:
                 "the File Centipede site."
             )
         else:
-            local_zone = get_local_zone(DEFAULT_TIMEZONE)
+            local_zone = self._get_local_zone()
             next_local = next_allowed_utc.astimezone(local_zone)
             next_time_str = next_local.strftime("%b %d, %Y %I:%M %p")
             human_remaining = self._format_interval_seconds(remaining_sec)
@@ -463,18 +491,16 @@ class TrayController:
                 "You can still use any activation codes that are already cached."
             )
 
-        box = MB(self.window)
-        box.setIcon(MB.Icon.Information)
+        box = QMessageBox(self.window)
+        box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("Online refresh delayed")
         box.setText(message)
-        box.addButton("Understood", MB.ButtonRole.AcceptRole)
+        box.addButton("Understood", QMessageBox.ButtonRole.AcceptRole)
         box.exec()
 
     def _show_active_codes_block_info(self, last_end: datetime) -> None:
         """Explain that online refresh is skipped because future codes exist."""
-        from PyQt6.QtWidgets import QMessageBox as MB
-
-        local_zone = get_local_zone(DEFAULT_TIMEZONE)
+        local_zone = self._get_local_zone()
         end_local = last_end.astimezone(local_zone)
         end_str = end_local.strftime("%b %d, %Y %I:%M %p")
 
@@ -486,11 +512,11 @@ class TrayController:
             "You can continue using the app normally until then."
         )
 
-        box = MB(self.window)
-        box.setIcon(MB.Icon.Information)
+        box = QMessageBox(self.window)
+        box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("Using cached activation codes")
         box.setText(message)
-        box.addButton("Understood", MB.ButtonRole.AcceptRole)
+        box.addButton("Understood", QMessageBox.ButtonRole.AcceptRole)
         box.exec()
 
     def _refresh_now(self) -> None:
@@ -498,9 +524,10 @@ class TrayController:
 
         - If blocked by active future codes, explain that and show their expiry.
         - If blocked by the 6-hour floor, explain next allowed time.
+        - Otherwise, run an online refresh via the background worker.
         """
         now_utc = datetime.now(timezone.utc)
-        codes = self.cache.load()
+        codes = self.cache.get_codes()
         active_codes = [c for c in codes if c.end >= now_utc]
         has_active = bool(active_codes)
 
@@ -526,12 +553,15 @@ class TrayController:
                 # Fallback (should be rare)
                 self._show_refresh_delay_info()
 
-        changed = self.window.refresh_codes(initial=False, use_network=use_network)
-        if use_network:
-            self._update_last_refresh()
-        if changed:
-            self._on_code_changed()
-        self.update_refresh_ui()
+            # Even when network refresh is blocked, update UI from cache.
+            changed = self.window.refresh_from_cache(initial=False)
+            if changed:
+                self._on_code_changed()
+            self.update_refresh_ui()
+            return
+
+        # Network refresh is allowed → run via background worker.
+        self._start_refresh_task(initial=False, use_network=True)
 
     def _on_code_changed(self) -> None:
         self.unseen_change = True
@@ -544,8 +574,21 @@ class TrayController:
         )
 
     def update_refresh_ui(self) -> None:
-        """Update tray tooltip and Status submenu."""
+        """Update tray tooltip and Status submenu.
+
+        Behaviour:
+        - If there are cached codes that extend into the future, "Next" and
+          "Next run" report how long those codes remain valid and their expiry
+          time (since no online refresh will occur before that).
+        - If there are no cached future codes, "Next" and "Next run" report
+          the daily auto-refresh schedule.
+        """
         now_utc = datetime.now(timezone.utc)
+
+        # Fetch codes once so we can reason about future coverage.
+        codes = self.cache.get_codes()
+        active_codes = [c for c in codes if c.end >= now_utc]
+        has_active_codes = bool(active_codes)
 
         # --- Last refresh age ---
         if self.last_refresh_utc is None:
@@ -557,28 +600,49 @@ class TrayController:
             age_sec = max(0, int((now_utc - base).total_seconds()))
             last_age_str = f"{self._format_interval_seconds(age_sec)} ago"
 
-        # --- Next auto refresh (relative) ---
-        if self.next_refresh_deadline is not None and self.auto_refresh_enabled:
-            remaining_sec = int((self.next_refresh_deadline - now_utc).total_seconds())
-            if remaining_sec < 0:
-                remaining_sec = 0
-            next_human = self._format_interval_seconds(remaining_sec)
-            next_short_relative = f"in {next_human}"
-        else:
-            next_short_relative = "n/a"
-
         # --- Timezone + current local time ---
-        tz_name = get_local_zone_name(DEFAULT_TIMEZONE)
-        local_zone = get_local_zone(DEFAULT_TIMEZONE)
+        tz_name = self._get_local_zone_name()
+        local_zone = self._get_local_zone()
         now_local = datetime.now(local_zone)
         now_local_str = now_local.strftime("%b %d, %Y %I:%M %p")
 
-        # Absolute next-run time in local tz (for auto schedule)
-        if self.next_refresh_deadline is not None and self.auto_refresh_enabled:
-            next_local = self.next_refresh_deadline.astimezone(local_zone)
-            next_run_str = next_local.strftime("%b %d, %Y %I:%M %p")
+        # --- Next auto / online refresh info ---
+        if has_active_codes:
+            # We have codes that are valid into the future; no online refresh
+            # will occur until the last of them expires.
+            last_end_utc = max(c.end for c in active_codes)
+            if last_end_utc.tzinfo is None:
+                last_end_utc = last_end_utc.replace(tzinfo=timezone.utc)
+
+            remaining_sec_codes = int((last_end_utc - now_utc).total_seconds())
+            if remaining_sec_codes < 0:
+                remaining_sec_codes = 0
+
+            # "Next" becomes "how long codes are still valid".
+            next_short_relative = (
+                f"cached codes valid for "
+                f"{self._format_interval_seconds(remaining_sec_codes)}"
+            )
+
+            # "Next run" shows when those codes expire locally.
+            last_end_local = last_end_utc.astimezone(local_zone)
+            next_run_str = last_end_local.strftime("%b %d, %Y %I:%M %p")
         else:
-            next_run_str = "n/a"
+            # No future codes cached; fall back to daily auto-refresh schedule.
+            if self.next_refresh_deadline is not None and self.auto_refresh_enabled:
+                remaining_sec = int(
+                    (self.next_refresh_deadline - now_utc).total_seconds()
+                )
+                if remaining_sec < 0:
+                    remaining_sec = 0
+                next_human = self._format_interval_seconds(remaining_sec)
+                next_short_relative = f"in {next_human}"
+
+                next_local = self.next_refresh_deadline.astimezone(local_zone)
+                next_run_str = next_local.strftime("%b %d, %Y %I:%M %p")
+            else:
+                next_short_relative = "n/a"
+                next_run_str = "n/a"
 
         # --- Common label width for tooltip alignment ---
         labels = {
@@ -648,7 +712,7 @@ class TrayController:
             self.tray_icon.setToolTip("")
 
     # ------------------------------------------------------------------ #
-    # Settings handlers (used by Settings dialog)
+    # Settings handlers
     # ------------------------------------------------------------------ #
 
     def toggle_show_tooltip(self, enabled: bool) -> None:
@@ -675,12 +739,12 @@ class TrayController:
         )
 
     def toggle_open_on_start(self, enabled: bool) -> None:
-        """Persist whether the main window should be shown when the app starts."""
+        """Persist the "open main window on start" preference."""
         self.open_on_start = enabled
         self.settings.setValue("open_on_start", enabled)
 
     # ------------------------------------------------------------------ #
-    # Autostart / integration helpers
+    # Autostart helpers
     # ------------------------------------------------------------------ #
 
     def _autostart_desktop_path(self) -> str:
@@ -695,14 +759,7 @@ class TrayController:
         autostart_dir = os.path.dirname(path)
         if enabled:
             os.makedirs(autostart_dir, exist_ok=True)
-            desktop_content = (
-                "[Desktop Entry]\n"
-                "Type=Application\n"
-                f"Name={APP_NAME}\n"
-                "Exec=fc-token\n"
-                "Icon=fc_token\n"
-                "X-GNOME-Autostart-enabled=true\n"
-            )
+            desktop_content = build_autostart_desktop()
             try:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(desktop_content)
@@ -715,52 +772,106 @@ class TrayController:
             except Exception:
                 pass
 
-    def uninstall_integration(self) -> None:
-        """Remove .desktop file and icons installed for the current user."""
-        from PyQt6.QtWidgets import QMessageBox as MB
+    # ------------------------------------------------------------------ #
+    # Desktop launcher / icon integration
+    # ------------------------------------------------------------------ #
 
-        reply = MB.question(
-            self.window,
-            "Remove integration",
-            "Remove the .desktop launcher and icons installed for this user?",
-            MB.StandardButton.Yes | MB.StandardButton.No,
-        )
-        if reply != MB.StandardButton.Yes:
-            return
-
+    def _user_prefix(self) -> Path:
+        """Return the base prefix for this user's XDG data directory."""
         data_home = os.environ.get(
             "XDG_DATA_HOME", os.path.expanduser("~/.local/share")
         )
-        apps_dir = os.path.join(data_home, "applications")
-        icons_base = os.path.join(data_home, "icons", "hicolor")
+        return Path(data_home)
 
-        paths = [
-            os.path.join(apps_dir, "fc_token.desktop"),
-            os.path.join(icons_base, "scalable", "apps", "fc_token-symbolic.svg"),
-            os.path.join(icons_base, "256x256", "apps", "fc_token.png"),
-        ]
+    def _desktop_paths(self) -> tuple[Path, Path, Path]:
+        """Return (desktop_target, png_target, symbolic_target) for user scope."""
+        prefix = self._user_prefix()
+        applications_dir = prefix / "applications"
+        icons_dir = prefix / "icons" / "hicolor"
 
-        removed_any = False
-        for p in paths:
+        desktop_target = applications_dir / DESKTOP_FILENAME
+        png_target = icons_dir / "256x256" / "apps" / ICON_PNG_NAME
+        symbolic_target = icons_dir / "scalable" / "apps" / "fc_token-symbolic.svg"
+
+        return desktop_target, png_target, symbolic_target
+
+    def is_desktop_integrated(self) -> bool:
+        """Return True if a user-level launcher/icons are present."""
+        desktop_target, png_target, symbolic_target = self._desktop_paths()
+        return any(p.exists() for p in (desktop_target, png_target, symbolic_target))
+
+    def _write_text_file(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def _copy_resource_if_available(self, name: str, dst: Path) -> None:
+        try:
+            pkg_root = files("fc_token.resources")
+            candidate = pkg_root.joinpath(name)
+            if hasattr(candidate, "is_file") and candidate.is_file():  # type: ignore[attr-defined]
+                src_path = Path(str(candidate))
+            else:
+                src_path = Path(str(candidate))
+            if src_path.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src_path.read_bytes())
+        except Exception:
+            # Best-effort; ignore resource copy failures.
+            pass
+
+    def set_desktop_integration_enabled(self, enabled: bool) -> None:
+        """Install or remove the user-level launcher/icons based on `enabled`."""
+        desktop_target, png_target, symbolic_target = self._desktop_paths()
+
+        if enabled:
             try:
-                if os.path.exists(p):
-                    os.remove(p)
-                    removed_any = True
-            except Exception:
-                pass
+                # Write .desktop file
+                content = build_launcher_desktop()
+                self._write_text_file(desktop_target, content)
 
-        if removed_any:
-            MB.information(
-                self.window,
-                "Removed",
-                "Launcher and/or icons removed for this user.",
-            )
+                # Copy icons from packaged resources if available
+                self._copy_resource_if_available(ICON_PNG_NAME, png_target)
+                self._copy_resource_if_available(ICON_SYMBOLIC_NAME, symbolic_target)
+
+                QMessageBox.information(
+                    self.window,
+                    "Desktop integration",
+                    "Launcher and icons have been installed (or were already present).",
+                )
+            except Exception as exc:
+                QMessageBox.warning(
+                    self.window,
+                    "Desktop integration",
+                    f"Could not install launcher/icons:\n{exc}",
+                )
         else:
-            MB.information(
-                self.window,
-                "Nothing to remove",
-                "No installed launcher or icons were found.",
-            )
+            # Remove .desktop and icons if present
+            removed_any = False
+            for path in (desktop_target, png_target, symbolic_target):
+                try:
+                    if path.exists():
+                        path.unlink()
+                        removed_any = True
+                except Exception:
+                    # Ignore individual delete errors
+                    pass
+
+            if removed_any:
+                QMessageBox.information(
+                    self.window,
+                    "Desktop integration",
+                    "Launcher and icons have been removed.",
+                )
+            else:
+                QMessageBox.information(
+                    self.window,
+                    "Desktop integration",
+                    "No launcher or icons were found to remove.",
+                )
+
+    # ------------------------------------------------------------------ #
+    # Timezone helpers
+    # ------------------------------------------------------------------ #
 
     def change_timezone(self) -> None:
         """Open timezone dialog and persist the selected timezone."""
@@ -771,9 +882,117 @@ class TrayController:
         # Save preference
         self.settings.setValue(KEY_TIMEZONE, new_tz)
 
-        # Refresh view and timers to reflect new timezone
-        changed = self.window.refresh_codes(initial=False)
+        # Refresh cached tzinfo & UI
+        self._refresh_timezone_cache()
+
+        # Refresh view from cache; no network access needed for tz-only change.
+        changed = self.window.refresh_from_cache(initial=False)
         if changed:
             self._on_code_changed()
 
         self.update_refresh_ui()
+
+    def _refresh_timezone_cache(self) -> None:
+        self._tz_name_cache = get_local_zone_name(DEFAULT_TIMEZONE)
+        self._tzinfo_cache = get_local_zone(DEFAULT_TIMEZONE)
+
+    def _get_local_zone_name(self) -> str:
+        return self._tz_name_cache
+
+    def _get_local_zone(self):
+        return self._tzinfo_cache
+
+    # ------------------------------------------------------------------ #
+    # Background refresh helpers
+    # ------------------------------------------------------------------ #
+
+    def _start_refresh_task(self, *, initial: bool, use_network: bool) -> None:
+        """Start a background refresh if one is not already running."""
+        if self._refresh_in_progress:
+            return
+
+        self._refresh_in_progress = True
+        self._current_refresh_initial = initial
+        self._current_refresh_use_network = use_network
+
+        self.action_refresh.setEnabled(False)
+
+        thread = QThread(self.window)
+        worker = RefreshWorker(self.cache, self.window.url, use_network=use_network)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_refresh_success)
+        worker.error.connect(self._on_refresh_error)
+        worker.finished.connect(self._cleanup_refresh_thread)
+        worker.error.connect(self._cleanup_refresh_thread)
+
+        self._refresh_thread = thread
+        self._refresh_worker = worker
+
+        thread.start()
+
+    def _on_refresh_success(self, codes: list) -> None:
+        """Handle successful completion of a background refresh."""
+        changed = self.window.refresh_from_codes(
+            codes,
+            initial=self._current_refresh_initial,
+        )
+        if self._current_refresh_use_network:
+            self._update_last_refresh()
+
+        if self.auto_refresh_enabled:
+            now_utc = datetime.now(timezone.utc)
+            self.next_refresh_deadline = now_utc + timedelta(
+                minutes=AUTO_REFRESH_MINUTES
+            )
+
+        if changed:
+            self._on_code_changed()
+
+        self.update_refresh_ui()
+
+    def _on_refresh_error(self, message: str) -> None:
+        """Handle a refresh failure (network or parsing)."""
+        # Keep using whatever is already cached; just refresh UI from cache.
+        self.window.refresh_from_cache(initial=self._current_refresh_initial)
+        self.update_refresh_ui()
+
+        self.tray_icon.showMessage(
+            "Refresh failed",
+            f"Could not refresh activation codes:\n{message}",
+            QSystemTrayIcon.MessageIcon.Warning,
+            5000,
+        )
+
+    def _cleanup_refresh_thread(self) -> None:
+        self._refresh_in_progress = False
+        self.action_refresh.setEnabled(True)
+
+        if self._refresh_worker is not None:
+            self._refresh_worker.deleteLater()
+            self._refresh_worker = None
+
+        if self._refresh_thread is not None:
+            self._refresh_thread.quit()
+            self._refresh_thread.wait()
+            self._refresh_thread.deleteLater()
+            self._refresh_thread = None
+
+    def _cancel_refresh_thread(self) -> None:
+        if not self._refresh_in_progress:
+            return
+        # Ask the thread to quit; if it's blocked in network I/O, it will
+        # finish once the request completes or times out.
+        if self._refresh_thread is not None:
+            self._refresh_thread.quit()
+            self._refresh_thread.wait()
+            self._refresh_thread.deleteLater()
+            self._refresh_thread = None
+
+        if self._refresh_worker is not None:
+            self._refresh_worker.deleteLater()
+            self._refresh_worker = None
+
+        self._refresh_in_progress = False
+        self.action_refresh.setEnabled(True)

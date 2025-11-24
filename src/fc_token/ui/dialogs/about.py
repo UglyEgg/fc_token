@@ -207,7 +207,10 @@ def show_about_dialog(parent: QWidget | None = None) -> None:
     layout.addWidget(license_lbl)
 
     # ------------------------------------------------------------
-    # Bottom: GitHub (left) + Close (right) on same row
+    # Bottom: GitHub + Close buttons (right-aligned)
+    # ------------------------------------------------------------
+    # ------------------------------------------------------------
+    # Bottom: GitHub (left) + Close (right)
     # ------------------------------------------------------------
     btn_row = QHBoxLayout()
 
@@ -222,13 +225,12 @@ def show_about_dialog(parent: QWidget | None = None) -> None:
         github_btn.clicked.connect(open_github)
         btn_row.addWidget(github_btn)
 
-    # Stretch between GitHub and Close -> GitHub stays left, Close goes right
+    # Stretch after GitHub so Close is pushed to the right
     btn_row.addStretch()
 
     close_btn = QPushButton("Close")
     close_btn.clicked.connect(dlg.accept)
     btn_row.addWidget(close_btn)
-
     layout.addLayout(btn_row)
 
     _about_dialog = dlg

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Sequence
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QClipboard, QIcon
@@ -17,7 +18,6 @@ from PyQt6.QtWidgets import (
 
 from fc_token.cache import CodeCache
 from fc_token.config import (
-    APP_NAME,
     DEFAULT_CODES_URL,
     DEFAULT_TIMEZONE,
 )
@@ -29,7 +29,13 @@ from fc_token.ui.utils import get_local_zone, make_code_view
 
 
 class MainWindow(QMainWindow):
-    """Main application window (without tray / scheduling logic)."""
+    """Main application window (without tray / scheduling logic).
+
+    This refactored version no longer performs any network operations itself.
+    Network refreshes are delegated to a background worker managed by the
+    TrayController, which calls :meth:`refresh_from_codes` with the newly
+    active list of codes.
+    """
 
     def __init__(self, cache: CodeCache) -> None:
         super().__init__()
@@ -113,30 +119,25 @@ class MainWindow(QMainWindow):
     # Data / cache operations
     # ------------------------------------------------------------------ #
 
-    def refresh_codes(
+    def refresh_from_codes(
         self,
+        codes: Sequence[CodeEntry],
         *,
         initial: bool = False,
-        use_network: bool = True,
     ) -> bool:
-        """Refresh codes and update the view.
+        """Update internal state and UI from a list of codes.
 
         Args:
-            initial: True if this is the first refresh (suppresses change signal).
-            use_network: If False, do not fetch from the remote site; only use
-                         the existing cached codes (offline mode).
+            codes: The full list of active codes (typically from CodeCache).
+            initial: True if this is the first refresh (suppresses change signal
+                     when computing whether the code has changed).
 
         Returns:
             True if the active code changed (and both old/new exist).
         """
-        if use_network:
-            active = self.cache.refresh(self.url)
-        else:
-            active = self.cache.load()
+        self.future_codes = list(codes)
 
-        self.future_codes = active
-
-        current_code = self.get_current_code()
+        current_code = self._get_current_code_from_list(self.future_codes)
         if current_code:
             self.current_code_view.setPlainText(current_code)
             self.current_label.setText("Current code:")
@@ -154,18 +155,41 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    def get_current_code(self) -> str | None:
+    def refresh_from_cache(self, *, initial: bool = False) -> bool:
+        """Load codes from the local cache and refresh the UI.
+
+        This is a lightweight, offline-only operation that runs entirely in
+        the GUI thread.
+        """
+        codes = self.cache.get_codes()
+        return self.refresh_from_codes(codes, initial=initial)
+
+    def _get_current_code_from_list(
+        self,
+        codes: Sequence[CodeEntry],
+    ) -> str | None:
         """Return the code active for the current time (in UTC), if any.
 
-        All internal validity windows are stored as UTC; we just query with
+        All internal validity windows are stored as UTC; we query with
         the current UTC timestamp and let the scraper logic match.
         """
-        codes = self.cache.load()
         if not codes:
             return None
 
         now_utc = datetime.now(timezone.utc)
-        return get_code_for_date(now_utc, codes)
+        return get_code_for_date(now_utc, list(codes))
+
+    def get_current_code(self) -> str | None:
+        """Public helper used by UI actions.
+
+        Prefer the in-memory codes from the last refresh; fall back to a
+        quick cache load if needed.
+        """
+        if self.future_codes:
+            codes = self.future_codes
+        else:
+            codes = self.cache.get_codes()
+        return self._get_current_code_from_list(codes)
 
     # ------------------------------------------------------------------ #
     # User actions

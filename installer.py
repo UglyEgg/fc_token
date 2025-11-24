@@ -40,23 +40,12 @@ from typing import Iterable
 
 from importlib.resources import files
 
-from fc_token.config import APP_NAME
+from fc_token.config import DESKTOP_FILENAME
+from fc_token.config import build_launcher_desktop
 
 
-DESKTOP_FILENAME = "fc_token.desktop"
 ICON_PNG_NAME = "fc_token.png"
 ICON_SYMBOLIC_NAME = "fc_token_symbolic.svg"
-
-DESKTOP_TEMPLATE = f"""[Desktop Entry]
-Type=Application
-Name={APP_NAME}
-Comment=File Centipede activation helper
-Exec=fc-token
-Icon=fc_token
-Terminal=false
-Categories=Network;Utility;
-StartupNotify=false
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +102,7 @@ def copy_file(src: Path, dst: Path) -> None:
 def install_launcher(target: InstallTarget) -> None:
     """Install the .desktop file and icons into the given target."""
     print(f"[fc-token] Installing desktop file into {target.applications_dir}")
-    write_text_file(target.desktop_target, DESKTOP_TEMPLATE)
+    write_text_file(target.desktop_target, build_launcher_desktop())
 
     print(f"[fc-token] Installing icons into {target.icons_dir}")
     png_src = find_resource(ICON_PNG_NAME)
