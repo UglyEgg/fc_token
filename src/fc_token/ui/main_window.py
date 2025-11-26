@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 from typing import Sequence
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QEvent
 from PyQt6.QtGui import QClipboard, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -21,10 +21,9 @@ from fc_token.config import (
     DEFAULT_CODES_URL,
     DEFAULT_TIMEZONE,
 )
-from fc_token.icons import load_app_icon
+from fc_token.icons import load_app_icon, is_dark_theme
 from fc_token.models import CodeEntry
 from fc_token.scraper import get_code_for_date
-from fc_token.ui.dialogs.future_codes import show_future_codes_dialog
 from fc_token.ui.utils import get_local_zone, make_code_view
 
 
@@ -44,7 +43,8 @@ class MainWindow(QMainWindow):
         self.cache = cache
         self.url: str = DEFAULT_CODES_URL
 
-        # Cached codes from last refresh, used for the "Future codes" popup.
+        # Cached codes from last refresh; used for the current code and
+        # cached coverage summary.
         self.future_codes: list[CodeEntry] = []
 
         # Track last known code string for change detection (tray uses this).
@@ -96,16 +96,44 @@ class MainWindow(QMainWindow):
         self.current_code_view.setMinimumHeight(60)
         layout.addWidget(self.current_code_view)
 
-        # Future codes button (opens popup dialog)
-        future_button = QPushButton("Future codes…")
-        future_button.setToolTip("Show all cached activation codes")
-        future_button.clicked.connect(self.show_future_codes)
-        layout.addWidget(future_button)
+        # Cached coverage summary (local dates only, no token values)
+        self.coverage_label = QLabel()
+        self.coverage_label.setObjectName("coverageLabel")
+        self.coverage_label.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.coverage_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.coverage_label.setText("No activation codes cached yet.")
+
+        # Apply theme-aware styling
+        self._apply_coverage_label_palette()
+
+        layout.addWidget(self.coverage_label)
 
         # Set the window icon to the app icon
         app_icon = load_app_icon()
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
+
+    def _apply_coverage_label_palette(self) -> None:
+        """Apply a readable, theme-aware color to the coverage label.
+
+        KDE/Qt palette roles can be too dark on some Plasma themes, so we use
+        hand-tuned high-contrast values instead.
+        """
+        if not hasattr(self, "coverage_label"):
+            return
+
+        if is_dark_theme():
+            # Bright but not pure white – highly legible on dark backgrounds
+            color = "#DDDDDD"
+        else:
+            # Dark grey that's readable but not harsh on light themes
+            color = "#444444"
+
+        self.coverage_label.setStyleSheet(f"color: {color}; font-size: 9pt;")
 
     # ------------------------------------------------------------------ #
     # Integration with tray controller
@@ -136,6 +164,7 @@ class MainWindow(QMainWindow):
             True if the active code changed (and both old/new exist).
         """
         self.future_codes = list(codes)
+        self._update_coverage_summary()
 
         current_code = self._get_current_code_from_list(self.future_codes)
         if current_code:
@@ -179,6 +208,72 @@ class MainWindow(QMainWindow):
         now_utc = datetime.now(timezone.utc)
         return get_code_for_date(now_utc, list(codes))
 
+    def _update_coverage_summary(self) -> None:
+        """Update the cached coverage label using local dates only.
+
+        This intentionally exposes *only* date ranges (no token values and no
+        precise timestamps) so that the user can see roughly how far into the
+        past/future their cached activation coverage extends, without revealing
+        any additional secrets. The actual token values remain visible only via
+        the Developer menu.
+        """
+        if not hasattr(self, "coverage_label"):
+            # UI not initialised yet (defensive; should not normally happen).
+            return
+
+        if not self.future_codes:
+            self.coverage_label.setText("No activation codes cached yet.")
+            self.coverage_label.setToolTip("")
+            return
+
+        local_zone = get_local_zone(DEFAULT_TIMEZONE)
+
+        # Convert to local dates and merge into contiguous ranges.
+        date_ranges: list[tuple[date, date]] = []
+        for entry in sorted(self.future_codes, key=lambda c: c.start):
+            start_local = entry.start.astimezone(local_zone).date()
+            end_local = entry.end.astimezone(local_zone).date()
+            if not date_ranges:
+                date_ranges.append((start_local, end_local))
+                continue
+
+            cur_start, cur_end = date_ranges[-1]
+            # If this block starts before or exactly one day after the previous
+            # block ends, merge them into a single range.
+            if start_local <= (cur_end + timedelta(days=1)):
+                if end_local > cur_end:
+                    date_ranges[-1] = (cur_start, end_local)
+            else:
+                date_ranges.append((start_local, end_local))
+
+        # Aggregate overall coverage + total days.
+        overall_start = date_ranges[0][0]
+        overall_end = date_ranges[-1][1]
+
+        total_days = 0
+        for start_d, end_d in date_ranges:
+            total_days += (end_d - start_d).days + 1
+
+        ranges_count = len(date_ranges)
+        days_label = "day" if total_days == 1 else "days"
+        ranges_label = "range" if ranges_count == 1 else "ranges"
+
+        summary = (
+            f"Cached activation coverage (local dates): "
+            f"{overall_start.isoformat()} → {overall_end.isoformat()}  • "
+            f"{total_days} {days_label} across {ranges_count} {ranges_label}"
+        )
+        self.coverage_label.setText(summary)
+
+        # Detailed breakdown as a tooltip (dates only, still no token values).
+        tooltip_lines = ["Cached ranges (local dates):"]
+        for idx, (start_d, end_d) in enumerate(date_ranges, start=1):
+            days = (end_d - start_d).days + 1
+            tooltip_lines.append(
+                f"  {idx}. {start_d.isoformat()} → {end_d.isoformat()}  ({days} days)"
+            )
+        self.coverage_label.setToolTip("\n".join(tooltip_lines))
+
     def get_current_code(self) -> str | None:
         """Public helper used by UI actions.
 
@@ -194,11 +289,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # User actions
     # ------------------------------------------------------------------ #
-
-    def show_future_codes(self) -> None:
-        """Open the future-codes popup."""
-        local_zone = get_local_zone(DEFAULT_TIMEZONE)
-        show_future_codes_dialog(self, self.future_codes, local_zone)
 
     def copy_current_code(self) -> None:
         """Copy the current code to the clipboard."""
@@ -224,12 +314,13 @@ class MainWindow(QMainWindow):
 
         self.cache.purge()
         self.future_codes = []
+        self._update_coverage_summary()
         self.current_code_view.clear()
         self.current_label.setText("Current code: None (cache purged)")
         self.last_code = None
 
     # ------------------------------------------------------------------ #
-    # Window behavior
+    # Window / palette behavior
     # ------------------------------------------------------------------ #
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
@@ -243,3 +334,12 @@ class MainWindow(QMainWindow):
             self._tray_controller.notify_hidden_to_tray()
         else:
             super().closeEvent(event)
+
+    def changeEvent(self, event: QEvent) -> None:  # type: ignore[override]
+        """Respond to palette/theme changes to keep coverage label readable."""
+        if event.type() in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ):
+            self._apply_coverage_label_palette()
+        super().changeEvent(event)

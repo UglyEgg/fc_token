@@ -1,21 +1,20 @@
-# fc_token/ui/tray.py
-
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import datetime, timedelta, timezone
+from importlib.resources import files
 from pathlib import Path
 from typing import Optional
-from importlib.resources import files
 
 from PyQt6.QtCore import QSettings, QTimer, QThread
-from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import (
     QApplication,
     QMenu,
-    QSystemTrayIcon,
     QMessageBox,
+    QSystemTrayIcon,
 )
+from PyQt6.QtGui import QAction, QColor
 
 from fc_token.cache import CodeCache
 from fc_token.config import (
@@ -36,6 +35,7 @@ from fc_token.icons import (
     load_tray_base_icon,
     recolor_icon,
 )
+from fc_token.ui.devtools import DevTools
 from fc_token.ui.dialogs.about import show_about_dialog
 from fc_token.ui.dialogs.timezone import run_timezone_dialog
 from fc_token.ui.dialogs.settings import run_settings_dialog
@@ -46,27 +46,29 @@ from fc_token.ui.workers import RefreshWorker
 # Global anti-abuse floor: 6 hours.
 MIN_REFRESH_MINUTES = 360
 
-# Auto-refresh schedule: once per day (used for the timer / "Next" info).
+# Auto-refresh schedule: once per day (used for the timer / "Next" info").
 AUTO_REFRESH_MINUTES = 24 * 60
 
 # Resource filenames packaged under fc_token/resources
 ICON_PNG_NAME = "fc_token.png"
 ICON_SYMBOLIC_NAME = "fc_token_symbolic.svg"
 
+# Developer menu "honest lock": only enabled if this resource hash matches.
+DEV_UNLOCK_RESOURCE_NAME = "uglyegg.png"
+DEV_UNLOCK_HASH = "327acaa5006c55b3c7a0100cf75df7d1a3232ecc08e1c9cbb63da3619543bc4f"
+
 
 class TrayController:
-    """System tray integration, scheduling, and notifications.
-
-    Network scraping and cache refreshes run in a background thread via
-    :class:`RefreshWorker`, keeping the GUI thread responsive even during slow
-    or failing network requests.
-    """
+    """System tray integration, scheduling, notifications, and dev tooling."""
 
     def __init__(self, window, cache: CodeCache) -> None:
         self.window = window
         self.cache = cache
 
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+
+        # Developer menu lock: only enabled if resource hash matches.
+        self.dev_mode_enabled: bool = self._detect_dev_mode()
 
         # Icon mode: "auto", "light", "dark"
         self.icon_mode: str = self.settings.value(KEY_ICON_MODE, "auto", type=str)
@@ -123,6 +125,10 @@ class TrayController:
 
         # Tray icon and menu
         self.tray_icon = QSystemTrayIcon(self.window)
+
+        # Dev tools helper (exists even if menu is locked; UI just hidden)
+        self.dev_tools = DevTools(self)
+
         self._setup_tray_icon()
         self._setup_menu()
 
@@ -140,6 +146,25 @@ class TrayController:
 
         # Finally show tray icon
         self.tray_icon.show()
+
+    # ------------------------------------------------------------------ #
+    # Developer mode "lock"
+    # ------------------------------------------------------------------ #
+
+    def _detect_dev_mode(self) -> bool:
+        """Return True if the developer menu should be enabled."""
+        try:
+            pkg_root = files("fc_token.resources")
+            candidate = pkg_root.joinpath(DEV_UNLOCK_RESOURCE_NAME)
+            src_path = Path(str(candidate))
+            if not src_path.is_file():
+                return False
+            data = src_path.read_bytes()
+        except Exception:
+            return False
+
+        digest = hashlib.sha256(data).hexdigest()
+        return digest == DEV_UNLOCK_HASH
 
     # ------------------------------------------------------------------ #
     # Initial load
@@ -233,6 +258,73 @@ class TrayController:
         self.status_menu_action.setVisible(self.show_menu_info)
 
         tray_menu.addSeparator()
+
+        # Developer submenu (only when dev_mode_enabled)
+        if self.dev_mode_enabled:
+            self.dev_menu = tray_menu.addMenu("Developer")
+            self.dev_menu_action = self.dev_menu.menuAction()
+
+            # Debug info / cache tools
+            self.dev_show_info = QAction("Debug info…", self.dev_menu)
+            self.dev_show_info.triggered.connect(self.dev_tools.show_debug_info)
+            self.dev_menu.addAction(self.dev_show_info)
+
+            self.dev_open_cache = QAction("Open cache folder", self.dev_menu)
+            self.dev_open_cache.triggered.connect(self.dev_tools.open_cache_folder)
+            self.dev_menu.addAction(self.dev_open_cache)
+
+            self.dev_menu.addSeparator()
+
+            self.dev_view_cache_json = QAction("Cache JSON…", self.dev_menu)
+            self.dev_view_cache_json.triggered.connect(self.dev_tools.show_cache_json)
+            self.dev_menu.addAction(self.dev_view_cache_json)
+
+            self.dev_menu.addSeparator()
+
+            # Time simulation and timeline
+            self.dev_simulate_time = QAction("Simulate time…", self.dev_menu)
+            self.dev_simulate_time.triggered.connect(
+                self.dev_tools.simulate_time_dialog
+            )
+            self.dev_menu.addAction(self.dev_simulate_time)
+
+            self.dev_show_timeline = QAction("Show code timeline…", self.dev_menu)
+            self.dev_show_timeline.triggered.connect(self.dev_tools.show_code_timeline)
+            self.dev_menu.addAction(self.dev_show_timeline)
+
+            self.dev_menu.addSeparator()
+
+            # Force refresh & stats
+            self.dev_force_refresh = QAction(
+                "Force online refresh (ignore limits)", self.dev_menu
+            )
+            self.dev_force_refresh.triggered.connect(self._force_online_refresh)
+            self.dev_menu.addAction(self.dev_force_refresh)
+
+            self.dev_menu.addSeparator()
+
+            self.dev_view_stats = QAction("Scrape stats…", self.dev_menu)
+            self.dev_view_stats.triggered.connect(self.dev_tools.show_scrape_stats)
+            self.dev_menu.addAction(self.dev_view_stats)
+
+            # Purge cache & settings reset
+            self.dev_menu.addSeparator()
+
+            self.dev_purge_cache = QAction("Purge cache and re-sync…", self.dev_menu)
+            self.dev_purge_cache.triggered.connect(
+                self.dev_tools.purge_cache_and_resync
+            )
+            self.dev_menu.addAction(self.dev_purge_cache)
+
+            self.dev_reset_settings = QAction(
+                "Reset settings to defaults…", self.dev_menu
+            )
+            self.dev_reset_settings.triggered.connect(
+                self.dev_tools.reset_settings_to_defaults
+            )
+            self.dev_menu.addAction(self.dev_reset_settings)
+
+            tray_menu.addSeparator()
 
         # Settings window
         self.action_settings = QAction("Settings…", tray_menu)
@@ -381,12 +473,7 @@ class TrayController:
     def get_next_allowed_refresh_info(
         self,
     ) -> tuple[Optional[datetime], Optional[int]]:
-        """Return (next_allowed_utc, remaining_seconds) for an online refresh
-        based on the 6-hour floor.
-
-        If there is no restriction (never refreshed before or floor already passed),
-        returns (None, None) or (None, 0).
-        """
+        """Return (next_allowed_utc, remaining_seconds) for an online refresh."""
         if self.last_refresh_utc is None:
             return None, None
 
@@ -402,15 +489,7 @@ class TrayController:
         return next_allowed, remaining_sec
 
     def _should_refresh_with_network(self) -> bool:
-        """Decide whether to hit the remote site or stay offline.
-
-        Rules:
-        - If the cache already contains *any* future codes (end >= now), stay offline.
-        - Otherwise, enforce a hard 6-hour floor between online scrapes:
-            elapsed_since_last_scrape >= MIN_REFRESH_MINUTES
-          is REQUIRED before scraping again.
-        - First run (no last_refresh_utc): allow exactly one initial scrape.
-        """
+        """Decide whether to hit the remote site or stay offline."""
         now_utc = datetime.now(timezone.utc)
         codes = self.cache.get_codes()
 
@@ -508,7 +587,7 @@ class TrayController:
             "The helper already has activation codes cached into the future.\n\n"
             "To avoid unnecessary traffic, it will not contact the File Centipede "
             "site again until those cached codes have expired.\n\n"
-            f"Your current codes are valid until approximately {end_str}.\n"
+            f"Your current codes are valid until approximately {end_str}.\n\n"
             "You can continue using the app normally until then."
         )
 
@@ -520,12 +599,7 @@ class TrayController:
         box.exec()
 
     def _refresh_now(self) -> None:
-        """Manual refresh from tray.
-
-        - If blocked by active future codes, explain that and show their expiry.
-        - If blocked by the 6-hour floor, explain next allowed time.
-        - Otherwise, run an online refresh via the background worker.
-        """
+        """Manual refresh from tray, respecting normal rules."""
         now_utc = datetime.now(timezone.utc)
         codes = self.cache.get_codes()
         active_codes = [c for c in codes if c.end >= now_utc]
@@ -563,6 +637,31 @@ class TrayController:
         # Network refresh is allowed → run via background worker.
         self._start_refresh_task(initial=False, use_network=True)
 
+    def _force_online_refresh(self) -> None:
+        """Developer: force an online refresh ignoring cache/floor rules."""
+        if self._refresh_in_progress:
+            QMessageBox.information(
+                self.window,
+                "Developer",
+                "A refresh is already in progress.",
+            )
+            return
+
+        reply = QMessageBox.question(
+            self.window,
+            "Force online refresh",
+            "Force an online refresh now, ignoring normal limits?\n\n"
+            "This will contact the File Centipede site immediately, even if:\n"
+            "  • Cached activation codes are still valid, or\n"
+            "  • The minimum interval between scrapes has not elapsed.\n\n"
+            "Use this sparingly.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._start_refresh_task(initial=False, use_network=True)
+
     def _on_code_changed(self) -> None:
         self.unseen_change = True
         self.update_tray_icon()
@@ -574,15 +673,7 @@ class TrayController:
         )
 
     def update_refresh_ui(self) -> None:
-        """Update tray tooltip and Status submenu.
-
-        Behaviour:
-        - If there are cached codes that extend into the future, "Next" and
-          "Next run" report how long those codes remain valid and their expiry
-          time (since no online refresh will occur before that).
-        - If there are no cached future codes, "Next" and "Next run" report
-          the daily auto-refresh schedule.
-        """
+        """Update tray tooltip and Status submenu."""
         now_utc = datetime.now(timezone.utc)
 
         # Fetch codes once so we can reason about future coverage.
@@ -620,7 +711,7 @@ class TrayController:
 
             # "Next" becomes "how long codes are still valid".
             next_short_relative = (
-                f"cached codes valid for "
+                "cached codes valid for "
                 f"{self._format_interval_seconds(remaining_sec_codes)}"
             )
 
@@ -808,10 +899,7 @@ class TrayController:
         try:
             pkg_root = files("fc_token.resources")
             candidate = pkg_root.joinpath(name)
-            if hasattr(candidate, "is_file") and candidate.is_file():  # type: ignore[attr-defined]
-                src_path = Path(str(candidate))
-            else:
-                src_path = Path(str(candidate))
+            src_path = Path(str(candidate))
             if src_path.is_file():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(src_path.read_bytes())
@@ -940,6 +1028,8 @@ class TrayController:
         )
         if self._current_refresh_use_network:
             self._update_last_refresh()
+            # Record scrape stats for geeks
+            self.dev_tools.record_scrape_stats(codes)
 
         if self.auto_refresh_enabled:
             now_utc = datetime.now(timezone.utc)
@@ -982,8 +1072,6 @@ class TrayController:
     def _cancel_refresh_thread(self) -> None:
         if not self._refresh_in_progress:
             return
-        # Ask the thread to quit; if it's blocked in network I/O, it will
-        # finish once the request completes or times out.
         if self._refresh_thread is not None:
             self._refresh_thread.quit()
             self._refresh_thread.wait()

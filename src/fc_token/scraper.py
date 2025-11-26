@@ -15,7 +15,7 @@ from typing import Any, List
 
 import requests
 
-from .config import DEFAULT_CODES_URL
+from .config import DEFAULT_CODES_URL, BROWSER_IDENTITIES
 from .models import CodeEntry, UTC
 
 # Activation codes appear to use a URL-safe Base64-like alphabet:
@@ -168,6 +168,34 @@ def fetch_codes(url: str = DEFAULT_CODES_URL, *, tz: tzinfo = UTC) -> list[CodeE
     resp.raise_for_status()
     return parse_codes(resp.text, tz=tz)
 
+
+
+
+def _choose_identity() -> tuple[str, str]:
+    """Return (identity_label, user_agent) chosen from configured identities.
+
+    Uses the BROWSER_IDENTITIES list from fc_token.config so that
+    browser strings can be updated centrally without touching the
+    scraper logic.
+    """
+    return random.choice(BROWSER_IDENTITIES)
+
+
+def fetch_codes_with_identity(
+    url: str = DEFAULT_CODES_URL, *, tz: tzinfo = UTC
+) -> tuple[list[CodeEntry], str, int]:
+    """Download and parse codes, returning (codes, identity_label, bytes_scraped).
+
+    bytes_scraped is the size of the HTTP response body in bytes.
+    """
+    identity_label, user_agent = _choose_identity()
+    headers = {"User-Agent": user_agent}
+    resp = _SESSION.get(url, headers=headers, timeout=15)
+    resp.raise_for_status()
+
+    body_bytes = len(resp.content or b"")
+    codes = parse_codes(resp.text, tz=tz)
+    return codes, identity_label, body_bytes
 
 def get_code_for_date(target: datetime, codes: list[CodeEntry]) -> str | None:
     """Return the activation code valid at the given datetime, if any.

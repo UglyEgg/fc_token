@@ -4,8 +4,6 @@ Refactored to:
 - Maintain a small in-memory cache to avoid repeated JSON loads.
 - Centralise expiration filtering in `refresh()`.
 - Provide a simple, read-only view via `get_codes()`.
-- Interpret remote validity windows in the File Centipede source timezone
-  (from config) and convert them to UTC for storage/comparison.
 """
 
 from __future__ import annotations
@@ -15,34 +13,33 @@ from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import List
-from zoneinfo import ZoneInfo
 
 from PyQt6.QtCore import QStandardPaths
 
-from .config import FILE_CENTIPEDE_TIMEZONE
 from .models import CodeEntry, UTC
-from .scraper import fetch_codes
+from .scraper import fetch_codes_with_identity
 
 
 @dataclass(slots=True)
 class CodeCache:
     """Manage on-disk cache of activation codes with expiration filtering.
 
-    All timestamps are *stored and compared* in UTC.
+    All timestamps are stored and compared in UTC.
 
-    Remote validity windows from the File Centipede site are interpreted in the
-    source timezone configured in ``FILE_CENTIPEDE_TIMEZONE`` (e.g.
-    ``"Asia/Shanghai"``) and converted to UTC when persisted, so comparisons
-    against "now" line up with the actual rollover times on the site.
+    This implementation keeps a small in-memory copy of the cache to avoid
+    repeated JSON parsing during normal operation.
     """
 
     app_name: str = "fc_token"
-    # Logical comparison zone for "now" and JSON persistence (always UTC).
     tz: tzinfo = UTC
     cache_dir: Path | None = field(init=False, default=None)
     cache_path: Path | None = field(init=False, default=None)
     _codes: List[CodeEntry] = field(init=False, default_factory=list)
     _loaded: bool = field(init=False, default=False)
+    # Metadata about the most recent network scrape (for stats/dev tools)
+    last_identity_used: str | None = field(init=False, default=None)
+    last_scrape_raw_bytes: int | None = field(init=False, default=None)
+    last_scraped_codes_count: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         cache_root = QStandardPaths.writableLocation(
@@ -81,7 +78,6 @@ class CodeCache:
             if not isinstance(item, dict):
                 continue
             try:
-                # Persisted timestamps are stored in UTC; interpret them as such.
                 codes.append(CodeEntry.from_dict(item, tz=self.tz))
             except Exception:
                 # Ignore malformed entries, keep the rest.
@@ -150,25 +146,24 @@ class CodeCache:
         - Existing cached codes are loaded (from memory or disk).
         - If ``use_network`` is True, fresh codes from the remote URL are fetched
           and merged by ``start_str``.
-        - Codes whose ``end`` timestamp is earlier than "now" in ``self.tz``
+        - Codes whose ``end`` timestamp is earlier than "now" in ``self.tz""
           are discarded.
         """
         # Index existing codes by their canonical start timestamp string.
         existing: dict[str, CodeEntry] = {c.start_str: c for c in self.get_codes()}
 
+        # Clear scrape metadata for this refresh.
+        self.last_identity_used = None
+        self.last_scrape_raw_bytes = None
+        self.last_scraped_codes_count = 0
+
         fresh: list[CodeEntry] = []
         if use_network:
-            # Interpret the scraped validity windows in the File Centipede
-            # source timezone (from config) so that "start" and "end" match
-            # the times shown on the website, then compare against UTC.
             try:
-                source_tz = ZoneInfo(FILE_CENTIPEDE_TIMEZONE)
-            except Exception:
-                # Fallback if the configured timezone is invalid.
-                source_tz = self.tz
-
-            try:
-                fresh = fetch_codes(url, tz=source_tz)
+                fresh, identity, raw_bytes = fetch_codes_with_identity(url, tz=self.tz)
+                self.last_identity_used = identity
+                self.last_scrape_raw_bytes = int(raw_bytes)
+                self.last_scraped_codes_count = len(fresh)
             except Exception:
                 # Network / parsing errors -> treat as "no new codes".
                 fresh = []
