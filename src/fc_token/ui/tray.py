@@ -141,6 +141,9 @@ class TrayController:
         self._current_refresh_initial: bool = False
         self._current_refresh_use_network: bool = False
 
+        # For duration measurement of network scrapes
+        self._current_refresh_started_at_utc: datetime | None = None
+
         # Start timers according to current settings
         self.update_timer()
 
@@ -335,7 +338,10 @@ class TrayController:
 
         # About and Quit
         self.action_about = QAction("About…", tray_menu)
-        self.action_about.triggered.connect(lambda: show_about_dialog(self.window))
+        # Pass self so About dialog / big egg can use dev_tools for stats
+        self.action_about.triggered.connect(
+            lambda: show_about_dialog(self.window, self)
+        )
         tray_menu.addAction(self.action_about)
 
         tray_menu.addSeparator()
@@ -1002,6 +1008,11 @@ class TrayController:
         self._refresh_in_progress = True
         self._current_refresh_initial = initial
         self._current_refresh_use_network = use_network
+        # Record start time for network scrapes (for duration stats / egg)
+        if use_network:
+            self._current_refresh_started_at_utc = datetime.now(timezone.utc)
+        else:
+            self._current_refresh_started_at_utc = None
 
         self.action_refresh.setEnabled(False)
 
@@ -1026,10 +1037,22 @@ class TrayController:
             codes,
             initial=self._current_refresh_initial,
         )
+
+        duration_sec: float | None = None
+        if self._current_refresh_use_network and self._current_refresh_started_at_utc:
+            now_utc = datetime.now(timezone.utc)
+            delta = now_utc - self._current_refresh_started_at_utc
+            duration_sec = max(0.0, delta.total_seconds())
+
         if self._current_refresh_use_network:
             self._update_last_refresh()
-            # Record scrape stats for geeks
-            self.dev_tools.record_scrape_stats(codes)
+            # Record scrape stats (for dev menu + egg compact stats)
+            # Always record for all users; DevTools handles nag dev-mode guard.
+            try:
+                self.dev_tools.record_scrape_stats(codes, duration_seconds=duration_sec)
+            except TypeError:
+                # Backwards compatibility in case dev_tools has old signature
+                self.dev_tools.record_scrape_stats(codes)  # type: ignore[arg-type]
 
         if self.auto_refresh_enabled:
             now_utc = datetime.now(timezone.utc)
@@ -1057,6 +1080,7 @@ class TrayController:
 
     def _cleanup_refresh_thread(self) -> None:
         self._refresh_in_progress = False
+        self._current_refresh_started_at_utc = None
         self.action_refresh.setEnabled(True)
 
         if self._refresh_worker is not None:
@@ -1083,4 +1107,5 @@ class TrayController:
             self._refresh_worker = None
 
         self._refresh_in_progress = False
+        self._current_refresh_started_at_utc = None
         self.action_refresh.setEnabled(True)

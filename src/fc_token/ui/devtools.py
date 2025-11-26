@@ -5,7 +5,7 @@ from __future__ import annotations
 This module is only used behind the "Developer" menu. It exposes a
 :class:`DevTools` helper that the :class:`TrayController` wires actions to.
 
-The goals are:
+Goals:
 - Provide rich debug information about cache, timezones and scheduling.
 - Expose "stats for geeks" about online scrapes.
 - Offer safe operations such as purging the cache or resetting settings.
@@ -72,6 +72,34 @@ class DevTools:
             v /= 1024.0
         return f"{value} B"
 
+    def _format_duration(self, seconds: float | None) -> str:
+        """Human-friendly formatting for scrape durations."""
+        if seconds is None:
+            return "n/a"
+        try:
+            secs = float(seconds)
+        except Exception:
+            return "n/a"
+
+        if secs < 0:
+            secs = 0.0
+
+        # Sub-second
+        if secs < 1.0:
+            return f"{secs * 1000.0:.0f} ms"
+
+        minutes = int(secs // 60)
+        rem = secs - minutes * 60
+        if minutes == 0:
+            return f"{rem:.1f} s"
+
+        hours = minutes // 60
+        minutes = minutes % 60
+        if hours == 0:
+            return f"{minutes:d} min {rem:.0f} s"
+
+        return f"{hours:d} h {minutes:d} min"
+
     # ------------------------------------------------------------------
     # Debug report
     # ------------------------------------------------------------------
@@ -122,7 +150,10 @@ class DevTools:
             next_allowed_local_str = na_utc.astimezone(local_zone).isoformat()
             remaining_str = c._format_interval_seconds(max(0, remaining_sec or 0))
 
-        if getattr(c, "next_refresh_deadline", None) is not None and c.auto_refresh_enabled:
+        if (
+            getattr(c, "next_refresh_deadline", None) is not None
+            and c.auto_refresh_enabled
+        ):
             nd_utc = c.next_refresh_deadline
             if nd_utc.tzinfo is None:
                 nd_utc = nd_utc.replace(tzinfo=timezone.utc)
@@ -313,7 +344,9 @@ class DevTools:
     # Time simulation & timeline
     # ------------------------------------------------------------------
 
-    def _find_code_for_datetime(self, when_utc: datetime, codes: list) -> Optional[object]:
+    def _find_code_for_datetime(
+        self, when_utc: datetime, codes: list
+    ) -> Optional[object]:
         if when_utc.tzinfo is None:
             when_utc = when_utc.replace(tzinfo=timezone.utc)
         else:
@@ -341,15 +374,16 @@ class DevTools:
 
         dt_edit = QDateTimeEdit(dlg)
         dt_edit.setCalendarPopup(True)
-        dt_edit.setDateTime(dt_edit.dateTime().fromString(
-            now_local.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss"
-        ))
+        dt_edit.setDateTime(
+            dt_edit.dateTime().fromString(
+                now_local.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss"
+            )
+        )
         row.addWidget(dt_edit)
         layout.addLayout(row)
 
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel,
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             parent=dlg,
         )
         layout.addWidget(buttons)
@@ -424,8 +458,7 @@ class DevTools:
                     status = "[FUTURE]"
 
                 lines.append(
-                    f"{idx:02d}. {status} "
-                    f"code={getattr(code, 'code', '<?>')}"
+                    f"{idx:02d}. {status} " f"code={getattr(code, 'code', '<?>')}"
                 )
                 lines.append(f"        start (UTC)  : {start_utc.isoformat()}")
                 lines.append(f"        end   (UTC)  : {end_utc.isoformat()}")
@@ -482,11 +515,18 @@ class DevTools:
         except Exception:
             pass
 
-    def record_scrape_stats(self, codes: list) -> None:
+    def record_scrape_stats(
+        self, codes: list, duration_seconds: float | None = None
+    ) -> None:
         """Record a single online scrape event for stats and nag logic.
 
         Called from TrayController._on_refresh_success when use_network=True.
         Uses metadata exposed on CodeCache (identity, body size, codes count).
+
+        duration_seconds:
+            Wall-clock scrape duration from "start network refresh" to
+            "usable cache / UI updated", in seconds. Optional; when not
+            provided, duration will be stored as null.
         """
         now_utc = datetime.now(timezone.utc)
         local_zone = self.c._get_local_zone()
@@ -517,6 +557,14 @@ class DevTools:
         if codes_count is None or codes_count < 0:
             codes_count = len(codes)
 
+        # Normalise duration field
+        duration_sec: float | None = None
+        if duration_seconds is not None:
+            try:
+                duration_sec = float(duration_seconds)
+            except Exception:
+                duration_sec = None
+
         stats = self._load_scrape_stats()
         stats.append(
             {
@@ -525,6 +573,7 @@ class DevTools:
                 "bytes": int(raw_bytes),
                 "codes": int(codes_count),
                 "identity": identity,
+                "duration_sec": duration_sec,
             }
         )
 
@@ -535,6 +584,32 @@ class DevTools:
 
         # Update nag logic based on number of activation codes scraped
         self._update_nag_progress(codes_count=int(codes_count))
+
+    def _compute_duration_aggregates(
+        self, stats: list[dict]
+    ) -> tuple[float | None, float | None, float | None]:
+        durations: list[float] = []
+        for s in stats:
+            d = s.get("duration_sec")
+            try:
+                if d is not None and float(d) > 0:
+                    durations.append(float(d))
+            except Exception:
+                pass
+
+        if not durations:
+            return None, None, None
+
+        durations_sorted = sorted(durations)
+        n = len(durations_sorted)
+        mid = n // 2
+        if n % 2 == 1:
+            median_val: float | None = durations_sorted[mid]
+        else:
+            median_val = 0.5 * (durations_sorted[mid - 1] + durations_sorted[mid])
+        avg_val: float | None = sum(durations_sorted) / n
+        last_val: float | None = durations[-1]
+        return median_val, avg_val, last_val
 
     def _build_scrape_stats_text(self) -> str:
         stats = self._load_scrape_stats()
@@ -548,25 +623,32 @@ class DevTools:
             ident = s.get("identity") or "unknown"
             identity_counts[ident] = identity_counts.get(ident, 0) + 1
 
+        median_val, avg_val, last_val = self._compute_duration_aggregates(stats)
+        median_str = self._format_duration(median_val)
+        avg_str = self._format_duration(avg_val)
+        last_str = self._format_duration(last_val)
+
         lines: list[str] = []
-        lines.append("== File Centipede helper – Scrape stats ==")
+        lines.append("== File Centipede helper – Scrape statistics ==")
         lines.append("")
-        lines.append(f"Total scrapes recorded        : {count}")
-        lines.append(
-            f"Total scraped data (HTTP body): {self._format_bytes(total_bytes)}"
-        )
-        lines.append(
-            f"Total activation codes scraped: {total_codes}"
-        )
+        lines.append(f"Total scrapes recorded : {count}")
+        lines.append(f"Total data downloaded  : {self._format_bytes(total_bytes)}")
+        lines.append(f"Total activation codes : {total_codes}")
+        lines.append("")
+        lines.append("[Durations]")
+        lines.append(f"  Median duration      : {median_str}")
+        lines.append(f"  Average duration     : {avg_str}")
+        lines.append(f"  Last duration        : {last_str}")
 
         if stats:
             first = stats[0]
             last = stats[-1]
             lines.append("")
-            lines.append(f"First scrape (UTC)            : {first.get('at_utc')}")
-            lines.append(f"First scrape (local)          : {first.get('at_local')}")
-            lines.append(f"Last scrape (UTC)             : {last.get('at_utc')}")
-            lines.append(f"Last scrape (local)           : {last.get('at_local')}")
+            lines.append("[Scrape window]")
+            lines.append(f"  First scrape (UTC)   : {first.get('at_utc')}")
+            lines.append(f"  First scrape (local) : {first.get('at_local')}")
+            lines.append(f"  Last scrape (UTC)    : {last.get('at_utc')}")
+            lines.append(f"  Last scrape (local)  : {last.get('at_local')}")
 
         lines.append("")
         lines.append("[Browser identities]")
@@ -576,10 +658,10 @@ class DevTools:
             for ident, n in sorted(
                 identity_counts.items(), key=lambda kv: kv[1], reverse=True
             ):
-                lines.append(f"  {ident}: {n} scrape(s)")
+                lines.append(f"  {ident:<24}: {n} scrape(s)")
 
         lines.append("")
-        lines.append("[Per-scrape details]")
+        lines.append("[Per-scrape log]")
         if not stats:
             lines.append("  (no scrapes recorded yet)")
         else:
@@ -589,9 +671,12 @@ class DevTools:
                 b = int(s.get("bytes", 0))
                 codes = int(s.get("codes", 0))
                 ident = s.get("identity") or "unknown"
+                d = s.get("duration_sec")
+                d_str = self._format_duration(d if d is not None else None)
                 lines.append(
-                    f"{i:02d}. UTC={at_utc}  local={at_local}  "
-                    f"codes={codes}  size≈{self._format_bytes(b)}  ident={ident}"
+                    f"  {i:02d}. UTC={at_utc}  local={at_local}  "
+                    f"codes={codes}  size≈{self._format_bytes(b)}  "
+                    f"ident={ident}  duration={d_str}"
                 )
 
         return "\n".join(lines)
@@ -600,7 +685,7 @@ class DevTools:
         text = self._build_scrape_stats_text()
 
         dlg = QDialog(self.c.window)
-        dlg.setWindowTitle("Developer – Scrape stats")
+        dlg.setWindowTitle("Developer – Scrape statistics")
 
         layout = QVBoxLayout(dlg)
         editor = QTextEdit(dlg)
@@ -624,6 +709,79 @@ class DevTools:
         layout.addWidget(buttons)
 
         dlg.resize(700, 500)
+        dlg.exec()
+
+    # ------------------------------------------------------------------
+    # Compact stats for Easter egg (non-dev)
+    # ------------------------------------------------------------------
+
+    def build_compact_stats_text(self) -> str:
+        """Compact, user-friendly summary of scrape stats (for the egg Easter egg)."""
+        stats = self._load_scrape_stats()
+        count = len(stats)
+
+        total_bytes = sum(int(s.get("bytes", 0)) for s in stats)
+        total_codes = sum(int(s.get("codes", 0)) for s in stats)
+
+        identity_counts: dict[str, int] = {}
+        for s in stats:
+            ident = s.get("identity") or "unknown"
+            identity_counts[ident] = identity_counts.get(ident, 0) + 1
+
+        median_val, avg_val, last_val = self._compute_duration_aggregates(stats)
+        median_str = self._format_duration(median_val)
+        avg_str = self._format_duration(avg_val)
+        last_str = self._format_duration(last_val)
+
+        lines: list[str] = []
+        lines.append("== File Centipede helper – Status ==")
+        lines.append("")
+        lines.append(
+            f"Scrapes: {count}   |   "
+            f"Downloaded data: {self._format_bytes(total_bytes)}   |   "
+            f"Codes fetched: {total_codes}"
+        )
+        lines.append(
+            "Durations (median / avg / last): " f"{median_str} / {avg_str} / {last_str}"
+        )
+
+        if identity_counts:
+            parts = [
+                f"{ident}={n}"
+                for ident, n in sorted(
+                    identity_counts.items(), key=lambda kv: kv[1], reverse=True
+                )
+            ]
+            lines.append("Identities used: " + ", ".join(parts))
+
+        # Mild reassurance this is all local
+        lines.append("")
+        lines.append("(These stats are stored locally on your machine only.)")
+
+        return "\n".join(lines)
+
+    def show_compact_stats_dialog(self) -> None:
+        """Show a small, read-only status dialog (for non-dev Easter egg)."""
+        text = self.build_compact_stats_text()
+
+        dlg = QDialog(self.c.window)
+        dlg.setWindowTitle("File Centipede helper – Status")
+
+        layout = QVBoxLayout(dlg)
+        editor = QTextEdit(dlg)
+        editor.setReadOnly(True)
+        editor.setPlainText(text)
+        layout.addWidget(editor)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Close,
+            parent=dlg,
+        )
+        buttons.rejected.connect(dlg.reject)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+
+        dlg.resize(600, 260)
         dlg.exec()
 
     # ------------------------------------------------------------------

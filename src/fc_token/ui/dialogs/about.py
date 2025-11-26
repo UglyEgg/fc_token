@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from importlib.resources import files
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QPixmap, QDesktopServices
@@ -22,6 +23,9 @@ from fc_token.config import (
 )
 from fc_token.icons import load_app_icon
 
+if TYPE_CHECKING:  # pragma: no cover
+    from fc_token.ui.tray import TrayController
+
 
 LICENSE_URL = "https://www.gnu.org/licenses/agpl-3.0.html#license-text"
 
@@ -40,7 +44,10 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
-def show_about_dialog(parent: QWidget | None = None) -> None:
+def show_about_dialog(
+    parent: QWidget | None = None,
+    tray: "TrayController | None" = None,
+) -> None:
     """Show the About dialog (singleton).
 
     If an About window is already open, bring it to front instead of creating
@@ -122,7 +129,7 @@ def show_about_dialog(parent: QWidget | None = None) -> None:
     layout.addWidget(desc_lbl)
 
     # ------------------------------------------------------------
-    # Row: File Centipede links (left) + egg logo (right)
+    # File Centipede links + "ugly egg" logo row
     # ------------------------------------------------------------
     fc_row = QHBoxLayout()
 
@@ -143,14 +150,13 @@ def show_about_dialog(parent: QWidget | None = None) -> None:
     links_layout.addWidget(buy_lbl)
 
     links_layout.addStretch()
-    fc_row.addLayout(links_layout)
+    fc_row.addLayout(links_layout, stretch=1)
 
-    fc_row.addStretch()
-
-    # Egg logo on the right, same row
+    # Right side: the ugly egg logo (clickable)
     logo_lbl = ClickableLabel()
-    logo_pix_full: QPixmap | None = None
+    logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+    logo_pix_full: QPixmap | None = None
     try:
         logo_path = files("fc_token.resources").joinpath("uglyegg.png")
         pix_full = QPixmap(str(logo_path))
@@ -170,8 +176,11 @@ def show_about_dialog(parent: QWidget | None = None) -> None:
 
     layout.addLayout(fc_row)
 
-    # Clicking the egg shows an enlarged version of the image in a popup
+    # Clicking the egg shows an enlarged version of the image in a popup.
+    # In the enlarged dialog, hovering shows a tooltip; clicking runs the
+    # compact stats Easter egg (if dev_tools is available on the tray).
     def show_large_logo() -> None:
+        nonlocal logo_pix_full
         if logo_pix_full is None:
             return
 
@@ -179,18 +188,31 @@ def show_about_dialog(parent: QWidget | None = None) -> None:
         logo_dlg.setWindowTitle("Logo")
         v = QVBoxLayout(logo_dlg)
 
-        big_lbl = QLabel()
+        # Big clickable egg
+        big_lbl = ClickableLabel()
         big_pix = logo_pix_full.scaledToWidth(
             256, Qt.TransformationMode.SmoothTransformation
         )
         big_lbl.setPixmap(big_pix)
         big_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Easter-egg tooltip (always shown, dev or non-dev)
+        big_lbl.setToolTip("Some eggs are just ugly")
         v.addWidget(big_lbl)
+
+        def on_big_clicked() -> None:
+            # Close the large-logo dialog first
+            logo_dlg.accept()
+            # Then show the compact stats if available
+            if tray is not None and getattr(tray, "dev_tools", None) is not None:
+                tray.dev_tools.show_compact_stats_dialog()
+
+        big_lbl.clicked.connect(on_big_clicked)
 
         close_btn_logo = QPushButton("Close")
         close_btn_logo.clicked.connect(logo_dlg.accept)
         v.addWidget(close_btn_logo, alignment=Qt.AlignmentFlag.AlignHCenter)
 
+        logo_dlg.resize(320, 320)
         logo_dlg.exec()
 
     logo_lbl.clicked.connect(show_large_logo)
@@ -206,9 +228,6 @@ def show_about_dialog(parent: QWidget | None = None) -> None:
     license_lbl.setOpenExternalLinks(True)
     layout.addWidget(license_lbl)
 
-    # ------------------------------------------------------------
-    # Bottom: GitHub + Close buttons (right-aligned)
-    # ------------------------------------------------------------
     # ------------------------------------------------------------
     # Bottom: GitHub (left) + Close (right)
     # ------------------------------------------------------------
@@ -233,6 +252,7 @@ def show_about_dialog(parent: QWidget | None = None) -> None:
     btn_row.addWidget(close_btn)
     layout.addLayout(btn_row)
 
+    # Show and keep the global reference
     _about_dialog = dlg
     dlg.show()
     dlg.raise_()
