@@ -620,77 +620,305 @@ class DevTools:
         return median_val, avg_val, last_val
 
     def _build_scrape_stats_text(self) -> str:
-        stats = self._load_scrape_stats()
-        count = len(stats)
+        """Build a rich scrape statistics report (developer view, HTML)."""
+        import math
+        from datetime import datetime, timezone
 
+        stats = self._load_scrape_stats()
+        total_scrapes = len(stats)
+
+        # --- Basic aggregates ---
         total_bytes = sum(int(s.get("bytes", 0)) for s in stats)
         total_codes = sum(int(s.get("codes", 0)) for s in stats)
 
-        identity_counts: dict[str, int] = {}
+        # Outcomes: we currently log only successful scrapes
+        if total_scrapes > 0:
+            success_count = total_scrapes
+            fail_count = 0
+            success_rate_str = "100%"
+        else:
+            success_count = 0
+            fail_count = 0
+            success_rate_str = "n/a"
+
+        # --- Durations & buckets ---
+        durations: list[float] = []
         for s in stats:
-            ident = s.get("identity") or "unknown"
-            identity_counts[ident] = identity_counts.get(ident, 0) + 1
+            d = s.get("duration_sec")
+            try:
+                if d is not None and float(d) > 0:
+                    durations.append(float(d))
+            except Exception:
+                pass
 
         median_val, avg_val, last_val = self._compute_duration_aggregates(stats)
-        median_str = self._format_duration(median_val)
-        avg_str = self._format_duration(avg_val)
-        last_str = self._format_duration(last_val)
 
-        lines: list[str] = []
-        lines.append("== File Centipede helper – Scrape statistics ==")
-        lines.append("")
-        lines.append(f"Total scrapes recorded : {count}")
-        lines.append(f"Total data downloaded  : {self._format_bytes(total_bytes)}")
-        lines.append(f"Total activation codes : {total_codes}")
-        lines.append("")
-        lines.append("[Durations]")
-        lines.append(f"  Median duration      : {median_str}")
-        lines.append(f"  Average duration     : {avg_str}")
-        lines.append(f"  Last duration        : {last_str}")
+        fastest_val = min(durations) if durations else None
+        slowest_val = max(durations) if durations else None
 
+        def fmt_sec(val: float | None) -> str:
+            if val is None:
+                return "n/a"
+            try:
+                return f"{float(val):.2f}"
+            except Exception:
+                return "n/a"
+
+        median_str = fmt_sec(median_val)
+        avg_str = fmt_sec(avg_val)
+        last_str = fmt_sec(last_val)
+        fastest_str = fmt_sec(fastest_val)
+        slowest_str = fmt_sec(slowest_val)
+
+        bucket_lt1 = bucket_1_2 = bucket_2_5 = bucket_5_10 = bucket_gt10 = 0
+        for d in durations:
+            if d < 1.0:
+                bucket_lt1 += 1
+            elif d < 2.0:
+                bucket_1_2 += 1
+            elif d < 5.0:
+                bucket_2_5 += 1
+            elif d < 10.0:
+                bucket_5_10 += 1
+            else:
+                bucket_gt10 += 1
+
+        # --- Scrape window / active days ---
         if stats:
-            first = stats[0]
-            last = stats[-1]
-            lines.append("")
-            lines.append("[Scrape window]")
-            lines.append(f"  First scrape (UTC)   : {first.get('at_utc')}")
-            lines.append(f"  First scrape (local) : {first.get('at_local')}")
-            lines.append(f"  Last scrape (UTC)    : {last.get('at_utc')}")
-            lines.append(f"  Last scrape (local)  : {last.get('at_local')}")
+            first_scrape_utc = stats[0].get("at_utc", "n/a")
+            last_scrape_utc = stats[-1].get("at_utc", "n/a")
 
-        lines.append("")
-        lines.append("[Browser identities]")
-        if not identity_counts:
-            lines.append("  (no scrapes recorded yet)")
-        else:
-            for ident, n in sorted(
-                identity_counts.items(), key=lambda kv: kv[1], reverse=True
-            ):
-                lines.append(f"  {ident:<24}: {n} scrape(s)")
+            day_counts: dict[str, int] = {}
+            for s in stats:
+                at_local = s.get("at_local") or ""
+                day = at_local.split("T", 1)[0] if "T" in at_local else at_local[:10]
+                if day:
+                    day_counts[day] = day_counts.get(day, 0) + 1
 
-        lines.append("")
-        lines.append("[Per-scrape log]")
-        if not stats:
-            lines.append("  (no scrapes recorded yet)")
+            active_days = len(day_counts)
+            if day_counts:
+                most_day, most_count = max(day_counts.items(), key=lambda kv: kv[1])
+                most_active_summary = f"{most_day} ({most_count} scrapes)"
+            else:
+                most_active_summary = "n/a"
         else:
-            for i, s in enumerate(stats, start=1):
-                at_utc = s.get("at_utc", "?")
-                at_local = s.get("at_local", "?")
-                b = int(s.get("bytes", 0))
-                codes = int(s.get("codes", 0))
-                ident = s.get("identity") or "unknown"
-                d = s.get("duration_sec")
-                d_str = self._format_duration(d if d is not None else None)
-                lines.append(
-                    f"  {i:02d}. UTC={at_utc}  local={at_local}  "
-                    f"codes={codes}  size≈{self._format_bytes(b)}  "
-                    f"ident={ident}  duration={d_str}"
+            first_scrape_utc = "n/a"
+            last_scrape_utc = "n/a"
+            active_days = 0
+            most_active_summary = "n/a"
+
+        # --- Code coverage (same as compact stats) ---
+        from datetime import timezone as _tzmod
+
+        codes = self.c.cache.get_codes()
+        if codes:
+            now_utc = datetime.now(_tzmod.utc)
+            earliest = min(code.start for code in codes)
+            latest = max(code.end for code in codes)
+
+            if earliest.tzinfo is None:
+                earliest = earliest.replace(tzinfo=_tzmod.utc)
+            if latest.tzinfo is None:
+                latest = latest.replace(tzinfo=_tzmod.utc)
+
+            local_zone = self.c._get_local_zone()
+            earliest_cov_local = earliest.astimezone(local_zone).isoformat()
+            latest_cov_local = latest.astimezone(local_zone).isoformat()
+
+            span_seconds = max(0, int((latest - earliest).total_seconds()))
+            total_span_str = (
+                self._format_duration(float(span_seconds))
+                if span_seconds > 0
+                else "n/a"
+            )
+
+            until_exhaust_seconds = int((latest - now_utc).total_seconds())
+            if until_exhaust_seconds <= 0:
+                until_exhaust_str = "expired"
+            else:
+                until_exhaust_str = self._format_duration(float(until_exhaust_seconds))
+        else:
+            earliest_cov_local = "n/a"
+            latest_cov_local = "n/a"
+            total_span_str = "n/a"
+            until_exhaust_str = "n/a"
+
+        # --- Uptime (shared with compact stats) ---
+        now_utc = datetime.now(timezone.utc)
+
+        # Current session
+        session_seconds = 0
+        session_start = getattr(self.c, "session_started_utc", None)
+        if isinstance(session_start, datetime):
+            if session_start.tzinfo is None:
+                session_start = session_start.replace(tzinfo=timezone.utc)
+            session_seconds = max(0, int((now_utc - session_start).total_seconds()))
+            current_session_str = self._format_duration(float(session_seconds))
+        else:
+            current_session_str = "n/a"
+
+        # Since installation / first run
+        s = self.c.settings
+        install_iso = s.value("lifecycle/install_utc", "", type=str)
+        first_run_local = "n/a"
+        total_uptime_str = "n/a"
+        longest_session_str = "n/a"  # Not tracked yet; placeholder
+
+        try:
+            if install_iso:
+                install_dt = datetime.fromisoformat(install_iso)
+                if install_dt.tzinfo is None:
+                    install_dt = install_dt.replace(tzinfo=timezone.utc)
+                local_zone = self.c._get_local_zone()
+                first_run_local = install_dt.astimezone(local_zone).isoformat()
+
+                raw_total = int(
+                    s.value("lifecycle/total_foreground_seconds", 0, type=int)
                 )
+                total_seconds = max(0, raw_total + session_seconds)
+                total_uptime_str = self._format_duration(float(total_seconds))
+        except Exception:
+            pass
 
-        return "\n".join(lines)
+        # --- Identity counts & entropy ---
+        identity_counts: dict[str, int] = {}
+        for srec in stats:
+            ident = srec.get("identity") or "unknown"
+            identity_counts[ident] = identity_counts.get(ident, 0) + 1
+
+        if total_scrapes > 0 and identity_counts:
+            probs = [n / total_scrapes for n in identity_counts.values()]
+            entropy = 0.0
+            for p in probs:
+                if p > 0:
+                    entropy -= p * math.log2(p)
+            entropy_str = f"{entropy:.2f} bits"
+        else:
+            entropy_str = "n/a"
+
+        # --- HTML helpers ---
+        def esc(text: str) -> str:
+            return (
+                str(text)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+
+        # Per-identity lines
+        if identity_counts:
+            id_lines = [
+                f"  {ident:<22} | {count} scrape(s)"
+                for ident, count in sorted(
+                    identity_counts.items(), key=lambda kv: kv[1], reverse=True
+                )
+            ]
+        else:
+            id_lines = ["  (no scrapes recorded yet)"]
+
+        # Per-scrape log rows
+        log_lines: list[str] = []
+        for i, srec in enumerate(stats, start=1):
+            at_utc = srec.get("at_utc", "?")
+            at_local = srec.get("at_local", "?")
+            codes_val = int(srec.get("codes", 0) or 0)
+            raw_bytes = int(srec.get("bytes", 0) or 0)
+            bytes_fmt = self._format_bytes(raw_bytes)
+            ident = srec.get("identity") or "unknown"
+            d = srec.get("duration_sec")
+            d_str = fmt_sec(d if d is not None else None)
+
+            log_lines.append(
+                f"{i:02d}  {at_utc:<26}  {at_local:<26}  "
+                f"{codes_val:5d}  {bytes_fmt:<9}  {ident:<10}  {d_str:>8}"
+            )
+
+        # Header line for log
+        log_header = (
+            "  #   UTC timestamp                 local timestamp               "
+            "codes  size      UA         duration"
+        )
+
+        # --- Build HTML with light color highlights ---
+        lines: list[str] = []
+        lines.append(
+            "<span style='color:#4A7BD6;'>"
+            "==================== File Centipede helper – Scrape stats ===================="
+            "</span>"
+        )
+        lines.append("")
+        lines.append("<span style='color:#D7BA7D;'>OVERVIEW</span>")
+        lines.append(f"  Scrapes recorded         | {total_scrapes}")
+        lines.append(f"  Activation codes scraped | {total_codes}")
+        lines.append(f"  Data downloaded          | {self._format_bytes(total_bytes)}")
+        lines.append("")
+        lines.append("<span style='color:#D7BA7D;'>OUTCOMES</span>")
+        lines.append(f"  Successful scrapes       | {success_count}")
+        lines.append(f"  Failed scrapes           | {fail_count}")
+        lines.append(f"  Success rate             | {success_rate_str}")
+        lines.append("")
+        lines.append("<span style='color:#D7BA7D;'>UPTIME</span>")
+        lines.append(f"  First run (local)        | {first_run_local}")
+        lines.append(f"  Current session          | {current_session_str}")
+        lines.append(f"  Total uptime             | {total_uptime_str}")
+        lines.append(f"  Longest single session   | {longest_session_str}")
+        lines.append("")
+        lines.append("<span style='color:#D7BA7D;'>DURATIONS (s)</span>")
+        lines.append(f"  Fastest scrape           | {fastest_str}")
+        lines.append(f"  Slowest scrape           | {slowest_str}")
+        lines.append(f"  Median duration          | {median_str}")
+        lines.append(f"  Average duration         | {avg_str}")
+        lines.append(f"  Last scrape              | {last_str}")
+        lines.append("")
+        lines.append(
+            "<span style='color:#D7BA7D;'>DURATION HISTOGRAM (# scrapes)</span>"
+        )
+        lines.append(f"  <1s    : {bucket_lt1}")
+        lines.append(f"  1–2s   : {bucket_1_2}")
+        lines.append(f"  2–5s   : {bucket_2_5}")
+        lines.append(f"  5–10s  : {bucket_5_10}")
+        lines.append(f"  >10s   : {bucket_gt10}")
+        lines.append("")
+        lines.append("<span style='color:#D7BA7D;'>SCRAPE WINDOW</span>")
+        lines.append(f"  First scrape (UTC)       | {first_scrape_utc}")
+        lines.append(f"  Last scrape  (UTC)       | {last_scrape_utc}")
+        lines.append(f"  Active scrape days       | {active_days}")
+        lines.append(f"  Most active day          | {most_active_summary}")
+        lines.append("")
+        lines.append("<span style='color:#D7BA7D;'>CODE COVERAGE</span>")
+        lines.append(f"  Earliest cached start    | {earliest_cov_local}")
+        lines.append(f"  Latest cached end        | {latest_cov_local}")
+        lines.append(f"  Total coverage span      | {total_span_str}")
+        lines.append(f"  Time until exhaustion    | {until_exhaust_str}")
+        lines.append("")
+        lines.append("<span style='color:#D7BA7D;'>BROWSER IDENTITIES</span>")
+        lines.extend(id_lines)
+        lines.append(f"  Diversity (entropy)      | {entropy_str}")
+        lines.append("")
+        lines.append("<span style='color:#D7BA7D;'>PER-SCRAPE LOG</span>")
+        lines.append(log_header)
+        if log_lines:
+            lines.extend(log_lines)
+        else:
+            lines.append("  (no scrapes recorded yet)")
+        lines.append("")
+
+        # Wrap in <pre> with monospace
+        body = "\n".join(esc(line) for line in lines)
+        # Re-inject span tags (we escaped them above)
+        body = body.replace("&lt;span", "<span").replace("span&gt;", "span>")
+
+        html = (
+            "<html><body>"
+            "<pre style='font-family: monospace; font-size: 9pt;'>"
+            f"{body}"
+            "</pre>"
+            "</body></html>"
+        )
+        return html
 
     def show_scrape_stats(self) -> None:
-        text = self._build_scrape_stats_text()
+        text = self._build_scrape_stats_text()  # now HTML
 
         dlg = QDialog(self.c.window)
         dlg.setWindowTitle("Developer – Scrape statistics")
@@ -698,7 +926,7 @@ class DevTools:
         layout = QVBoxLayout(dlg)
         editor = QTextEdit(dlg)
         editor.setReadOnly(True)
-        editor.setPlainText(text)
+        editor.setHtml(text)
         layout.addWidget(editor)
 
         buttons = QDialogButtonBox(
@@ -711,12 +939,12 @@ class DevTools:
         buttons.accepted.connect(dlg.accept)
 
         def do_copy() -> None:
-            QApplication.clipboard().setText(text)
+            QApplication.clipboard().setText(editor.toPlainText())
 
         buttons.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(do_copy)
         layout.addWidget(buttons)
 
-        dlg.resize(700, 500)
+        dlg.resize(900, 600)
         dlg.exec()
 
     # ------------------------------------------------------------------
@@ -890,11 +1118,37 @@ class DevTools:
         lines.append("")
         lines.append("(Stats are kept locally on this machine only.)")
 
-        return "\n".join(lines)
+        import html as _html
+
+        plain_lines = lines
+
+        def colorize(line: str) -> str:
+            if line.startswith("== "):
+                return "<span style='color:#4A7BD6;'>" f"{_html.escape(line)}" "</span>"
+            if line in (
+                "📦 Scrapes & data",
+                "🚀 Performance",
+                "✅ Reliability",
+                "🗺 Coverage",
+                "⏱ Uptime",
+                "🧬 User-agent rotation",
+            ):
+                return "<span style='color:#D7BA7D;'>" f"{_html.escape(line)}" "</span>"
+            return _html.escape(line)
+
+        body = "\n".join(colorize(l) for l in plain_lines)
+        html = (
+            "<html><body>"
+            "<pre style='font-family: monospace; font-size: 9pt;'>"
+            f"{body}"
+            "</pre>"
+            "</body></html>"
+        )
+        return html
 
     def show_compact_stats_dialog(self) -> None:
         """Show a small, read-only status dialog (for non-dev Easter egg)."""
-        text = self.build_compact_stats_text()
+        text = self.build_compact_stats_text()  # now HTML
 
         dlg = QDialog(self.c.window)
         dlg.setWindowTitle("File Centipede helper – Status")
@@ -902,10 +1156,7 @@ class DevTools:
         layout = QVBoxLayout(dlg)
         editor = QTextEdit(dlg)
         editor.setReadOnly(True)
-        code_font = QFont()
-        code_font.setFamily("Monospace")
-        editor.setFont(code_font)
-        editor.setPlainText(text)
+        editor.setHtml(text)
         layout.addWidget(editor)
 
         buttons = QDialogButtonBox(
