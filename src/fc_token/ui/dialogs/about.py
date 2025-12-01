@@ -19,7 +19,7 @@ from fc_token.config import (
     APP_VERSION,
     FILE_CENTIPEDE_URL,
     FILE_CENTIPEDE_BUY_URL,
-    CONFIG,
+    PROJECT_URL,
 )
 from fc_token.icons import load_app_icon
 
@@ -185,7 +185,12 @@ def show_about_dialog(
             return
 
         logo_dlg = QDialog(dlg)
-        logo_dlg.setWindowTitle("Logo")
+        logo_dlg.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Popup
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        logo_dlg.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         v = QVBoxLayout(logo_dlg)
 
         # Big clickable egg
@@ -233,7 +238,7 @@ def show_about_dialog(
     # ------------------------------------------------------------
     btn_row = QHBoxLayout()
 
-    project_url = CONFIG.project_url
+    project_url = PROJECT_URL
 
     if project_url:
         github_btn = QPushButton("GitHub")

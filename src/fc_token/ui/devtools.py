@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QDateTimeEdit,
@@ -44,6 +44,11 @@ SCRAPE_STATS_MAX_ENTRIES = 200
 REGISTER_NAG_THRESHOLD = 20  # activation codes per nag cycle
 REGISTER_NAG_PROGRESS_KEY = "nag/accumulated_codes"
 REGISTER_URL = "https://filecxx.com/en_US/activation_code.html"
+
+
+# Uptime / lifecycle tracking
+INSTALL_TIMESTAMP_KEY = "lifecycle/install_utc"
+TOTAL_FOREGROUND_SECONDS_KEY = "lifecycle/total_foreground_seconds"
 
 
 @dataclass
@@ -256,6 +261,9 @@ class DevTools:
         layout = QVBoxLayout(dlg)
         editor = QTextEdit(dlg)
         editor.setReadOnly(True)
+        code_font = QFont()
+        code_font.setFamily("Monospace")
+        editor.setFont(code_font)
         editor.setPlainText(report)
         layout.addWidget(editor)
 
@@ -717,46 +725,170 @@ class DevTools:
 
     def build_compact_stats_text(self) -> str:
         """Compact, user-friendly summary of scrape stats (for the egg Easter egg)."""
-        stats = self._load_scrape_stats()
-        count = len(stats)
+        import math
 
+        stats = self._load_scrape_stats()
+        total_scrapes = len(stats)
+
+        # Basic aggregates from existing helpers
         total_bytes = sum(int(s.get("bytes", 0)) for s in stats)
         total_codes = sum(int(s.get("codes", 0)) for s in stats)
 
         identity_counts: dict[str, int] = {}
+        durations: list[float] = []
         for s in stats:
             ident = s.get("identity") or "unknown"
             identity_counts[ident] = identity_counts.get(ident, 0) + 1
+            d = s.get("duration_sec")
+            try:
+                if d is not None and float(d) > 0:
+                    durations.append(float(d))
+            except Exception:
+                pass
 
         median_val, avg_val, last_val = self._compute_duration_aggregates(stats)
+
+        # Fastest / slowest (best / worst) duration from the same durations list
+        if durations:
+            fastest_val = min(durations)
+            slowest_val = max(durations)
+        else:
+            fastest_val = None
+            slowest_val = None
+
         median_str = self._format_duration(median_val)
         avg_str = self._format_duration(avg_val)
         last_str = self._format_duration(last_val)
+        fastest_str = self._format_duration(fastest_val)
+        slowest_str = self._format_duration(slowest_val)
+
+        # Reliability: currently we only log *successful* scrapes.
+        # If stats exist, treat them all as successes and 0 failures.
+        if total_scrapes > 0:
+            success_count = total_scrapes
+            fail_count = 0
+            success_rate_str = "100%"
+        else:
+            success_count = 0
+            fail_count = 0
+            success_rate_str = "n/a"
+
+        # Coverage & time to exhaustion from the cached codes
+        codes = self.c.cache.get_codes()
+        if codes:
+            now_utc = datetime.now(timezone.utc)
+            earliest = min(code.start for code in codes)
+            latest = max(code.end for code in codes)
+
+            # Normalise to UTC
+            if earliest.tzinfo is None:
+                earliest = earliest.replace(tzinfo=timezone.utc)
+            if latest.tzinfo is None:
+                latest = latest.replace(tzinfo=timezone.utc)
+
+            span_seconds = max(0, int((latest - earliest).total_seconds()))
+            total_span_str = (
+                self._format_duration(span_seconds) if span_seconds > 0 else "n/a"
+            )
+
+            until_exhaust_seconds = int((latest - now_utc).total_seconds())
+            if until_exhaust_seconds <= 0:
+                until_exhaust_str = "expired"
+            else:
+                until_exhaust_str = self._format_duration(until_exhaust_seconds)
+        else:
+            total_span_str = "n/a"
+            until_exhaust_str = "n/a"
+
+        # Uptime
+        now_utc = datetime.now(timezone.utc)
+
+        # This session: based on controller.session_started_utc
+        session_seconds = 0
+        session_start = getattr(self.c, "session_started_utc", None)
+        if isinstance(session_start, datetime):
+            if session_start.tzinfo is None:
+                session_start = session_start.replace(tzinfo=timezone.utc)
+            session_seconds = max(0, int((now_utc - session_start).total_seconds()))
+            current_session_str = self._format_duration(float(session_seconds))
+        else:
+            current_session_str = "n/a"
+
+        # Since installation: use INSTALL_TIMESTAMP_KEY + TOTAL_FOREGROUND_SECONDS_KEY
+        settings = self.c.settings
+        install_iso = settings.value(INSTALL_TIMESTAMP_KEY, "", type=str)
+        try:
+            if install_iso:
+                install_dt = datetime.fromisoformat(install_iso)
+                if install_dt.tzinfo is None:
+                    install_dt = install_dt.replace(tzinfo=timezone.utc)
+                raw_total = int(
+                    settings.value(TOTAL_FOREGROUND_SECONDS_KEY, 0, type=int)
+                )
+                # Include current session so the value is live
+                total_seconds = max(0, raw_total + session_seconds)
+                total_uptime_str = self._format_duration(float(total_seconds))
+            else:
+                total_uptime_str = "n/a"
+        except Exception:
+            total_uptime_str = "n/a"
+
+        # User-agent rotation entropy (diversity score)
+        if total_scrapes > 0 and identity_counts:
+            probs = [n / total_scrapes for n in identity_counts.values()]
+            entropy = 0.0
+            for p in probs:
+                if p > 0:
+                    entropy -= p * math.log2(p)
+            entropy_str = f"{entropy:.2f} bits"
+        else:
+            entropy_str = "n/a"
+
+        # Identity usage lines
+        if identity_counts:
+            # Sort by usage count, descending
+            id_lines = [
+                f"      {ident}: {count}"
+                for ident, count in sorted(
+                    identity_counts.items(), key=lambda kv: kv[1], reverse=True
+                )
+            ]
+            identity_block = "\n".join(id_lines)
+        else:
+            identity_block = "      (no scrapes recorded yet)"
 
         lines: list[str] = []
         lines.append("== File Centipede helper – Status ==")
         lines.append("")
-        lines.append(
-            f"Scrapes: {count}   |   "
-            f"Downloaded data: {self._format_bytes(total_bytes)}   |   "
-            f"Codes fetched: {total_codes}"
-        )
-        lines.append(
-            "Durations (median / avg / last): " f"{median_str} / {avg_str} / {last_str}"
-        )
-
-        if identity_counts:
-            parts = [
-                f"{ident}={n}"
-                for ident, n in sorted(
-                    identity_counts.items(), key=lambda kv: kv[1], reverse=True
-                )
-            ]
-            lines.append("Identities used: " + ", ".join(parts))
-
-        # Mild reassurance this is all local
+        lines.append("📦 Scrapes & data")
+        lines.append(f"  • Scrapes recorded   : {total_scrapes}")
+        lines.append(f"  • Activation codes   : {total_codes}")
+        lines.append(f"  • Data downloaded    : {self._format_bytes(total_bytes)}")
         lines.append("")
-        lines.append("(These stats are stored locally on your machine only.)")
+        lines.append("🚀 Performance")
+        lines.append(f"  • Typical (median)   : {median_str}")
+        lines.append(f"  • Average            : {avg_str}")
+        lines.append(f"  • Fastest / slowest  : {fastest_str} / {slowest_str}")
+        lines.append(f"  • Last scrape        : {last_str}")
+        lines.append("")
+        lines.append("✅ Reliability")
+        lines.append(f"  • Successful / failed: {success_count} / {fail_count}")
+        lines.append(f"  • Success rate       : {success_rate_str}")
+        lines.append("")
+        lines.append("🗺 Coverage")
+        lines.append(f"  • Coverage span      : {total_span_str}")
+        lines.append(f"  • Time to exhaustion : {until_exhaust_str}")
+        lines.append("")
+        lines.append("⏱ Uptime")
+        lines.append(f"  • This session       : {current_session_str}")
+        lines.append(f"  • Since installation : {total_uptime_str}")
+        lines.append("")
+        lines.append("🧬 User-agent rotation")
+        lines.append(f"  • Diversity score    : {entropy_str}")
+        lines.append("  • Usage counts       :")
+        lines.append(identity_block)
+        lines.append("")
+        lines.append("(Stats are kept locally on this machine only.)")
 
         return "\n".join(lines)
 
@@ -770,6 +902,9 @@ class DevTools:
         layout = QVBoxLayout(dlg)
         editor = QTextEdit(dlg)
         editor.setReadOnly(True)
+        code_font = QFont()
+        code_font.setFamily("Monospace")
+        editor.setFont(code_font)
         editor.setPlainText(text)
         layout.addWidget(editor)
 

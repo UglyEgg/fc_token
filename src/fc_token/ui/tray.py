@@ -35,7 +35,12 @@ from fc_token.icons import (
     load_tray_base_icon,
     recolor_icon,
 )
-from fc_token.ui.devtools import DevTools
+from fc_token.ui.devtools import (
+    DevTools,
+    INSTALL_TIMESTAMP_KEY,
+    TOTAL_FOREGROUND_SECONDS_KEY,
+)
+
 from fc_token.ui.dialogs.about import show_about_dialog
 from fc_token.ui.dialogs.timezone import run_timezone_dialog
 from fc_token.ui.dialogs.settings import run_settings_dialog
@@ -66,6 +71,15 @@ class TrayController:
         self.cache = cache
 
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+
+        # Uptime / lifecycle tracking
+        install_iso = self.settings.value(INSTALL_TIMESTAMP_KEY, "", type=str)
+        if not install_iso:
+            now_utc = datetime.now(timezone.utc)
+            self.settings.setValue(INSTALL_TIMESTAMP_KEY, now_utc.isoformat())
+
+        # Track this session's start (foreground uptime)
+        self.session_started_utc: datetime = datetime.now(timezone.utc)
 
         # Developer menu lock: only enabled if resource hash matches.
         self.dev_mode_enabled: bool = self._detect_dev_mode()
@@ -442,6 +456,22 @@ class TrayController:
 
         # Ensure any background refresh completes cleanly
         self._cancel_refresh_thread()
+
+        # Accumulate foreground uptime into TOTAL_FOREGROUND_SECONDS_KEY
+        try:
+            total_foreground = int(
+                self.settings.value(TOTAL_FOREGROUND_SECONDS_KEY, 0, type=int)
+            )
+        except Exception:
+            total_foreground = 0
+
+        now_utc = datetime.now(timezone.utc)
+        elapsed = now_utc - self.session_started_utc
+        extra_seconds = max(0, int(elapsed.total_seconds()))
+        self.settings.setValue(
+            TOTAL_FOREGROUND_SECONDS_KEY,
+            total_foreground + extra_seconds,
+        )
 
         QApplication.instance().quit()
 
