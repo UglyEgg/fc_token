@@ -39,7 +39,7 @@ from importlib.resources import files
 from pathlib import Path
 
 from fc_token.config import DESKTOP_FILENAME
-from fc_token.config import build_launcher_desktop
+from fc_token.desktop_entry import build_launcher_desktop
 
 
 ICON_PNG_NAME = "fc_token.png"
