@@ -42,9 +42,7 @@ class CodeCache:
     last_scraped_codes_count: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
-        cache_root = QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.CacheLocation
-        )
+        cache_root = self._get_cache_root()
         if cache_root:
             base_path = Path(cache_root)
         else:
@@ -55,6 +53,12 @@ class CodeCache:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.cache_path = self.cache_dir / "file_centipede_codes.json"
+
+    def _get_cache_root(self) -> str:
+        """Return the base cache directory path from QStandardPaths."""
+        return QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.CacheLocation
+        )
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -171,7 +175,7 @@ class CodeCache:
         for entry in fresh:
             existing[entry.start_str] = entry
 
-        now_utc = datetime.now(self.tz)
+        now_utc = self._now()
         active = [c for c in existing.values() if c.end >= now_utc]
 
         # Keep entries ordered by start time for predictable behaviour.
@@ -179,3 +183,7 @@ class CodeCache:
 
         self.save(active)
         return active
+
+    def _now(self) -> datetime:
+        """Return the current datetime in the configured timezone."""
+        return datetime.now(self.tz)
