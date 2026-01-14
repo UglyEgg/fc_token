@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from PyQt6.QtWidgets import QApplication
 
 from fc_token.cache import CodeCache
-from fc_token.config import APP_NAME, APP_VERSION
+from fc_token.config import APP_NAME, APP_VERSION, DESKTOP_FILENAME
 from fc_token.icons import load_app_icon
 from fc_token.ui.main_window import MainWindow
 from fc_token.ui.tray import TrayController
+
+
+def _desktop_file_exists() -> bool:
+    """Return True when the .desktop file is installed in an XDG applications dir."""
+    desktop_filename = Path(DESKTOP_FILENAME).name
+    data_home = (
+        Path(os.environ.get("XDG_DATA_HOME", ""))
+        or Path.home() / ".local" / "share"
+    )
+    data_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+    search_dirs = [data_home] + [Path(path) for path in data_dirs.split(":") if path]
+    for base_dir in search_dirs:
+        if (base_dir / "applications" / desktop_filename).exists():
+            return True
+    return False
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -40,7 +57,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not app_icon.isNull():
                 app.setWindowIcon(app_icon)
 
-            app.setDesktopFileName("fc_token")
+            if _desktop_file_exists():
+                app.setDesktopFileName(Path(DESKTOP_FILENAME).stem)
 
             cache = CodeCache()
             win = MainWindow(cache)
@@ -63,7 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
-    app.setDesktopFileName("fc_token")
+    if _desktop_file_exists():
+        app.setDesktopFileName(Path(DESKTOP_FILENAME).stem)
 
     cache = CodeCache()
     win = MainWindow(cache)
