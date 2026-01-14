@@ -49,7 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             # For self-test, we don't need to show the main window.
             win.hide()
-            tray.initial_load()
+            tray.initial_load(use_network=False)
             return 0
         except Exception as e:  # pragma: no cover - defensive
             print(f"fc-token self-test failed: {e}", file=sys.stderr)

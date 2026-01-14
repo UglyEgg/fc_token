@@ -187,12 +187,13 @@ class TrayController:
     # Initial load
     # ------------------------------------------------------------------ #
 
-    def initial_load(self) -> None:
+    def initial_load(self, *, use_network: bool | None = None) -> None:
         """Perform the initial cache refresh and UI update.
 
         Respects offline-first rules and minimum scrape interval.
         """
-        use_network = self._should_refresh_with_network()
+        if use_network is None:
+            use_network = self._should_refresh_with_network()
 
         if use_network:
             self._start_refresh_task(initial=True, use_network=True)
