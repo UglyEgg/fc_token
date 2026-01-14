@@ -12,11 +12,11 @@
   - Uses duck-themed icons for both window and tray.
   - Dark/light/auto tray icon modes.
 
-- 🔁 **Automatic refresh**
+- 🔁 **Automatic refresh (offline-first)**
 
-  - Configurable refresh interval (days/hours).
-  - Optional “auto interval” mode that schedules itself based on the expiry of the last known code.
-  - Manual “Refresh now” action from the tray menu.
+  - Daily auto-refresh option, with manual “Refresh now” from the tray menu.
+  - Skips network scrapes while cached codes are still valid.
+  - Enforces a minimum 6-hour gap between online scrapes.
 
 - 📅 **Future codes browser**
 
@@ -141,17 +141,31 @@ Once running:
 - The **“Future codes…”** button opens a list of cached codes with their validity windows. Click a row to see the full code.
 - The tray menu allows:
 
-  - “Refresh now”
-  - “Purge cache”
-  - Toggling auto-refresh
-  - Changing the refresh interval
-  - Toggling tray icon theme (auto/light/dark)
-  - Enabling/disabling autostart on login
-  - Removing user-level launcher/icons
-  - Viewing the About dialog
-  - Quitting the application
+  - “Refresh now” plus a status submenu (last refresh, next run, timezone)
+  - Opening the Settings dialog
+  - Toggling daily auto-refresh
+  - Changing tray icon theme (auto/light/dark)
+  - Enabling/disabling desktop integration and autostart on login
+  - Controlling whether the main window opens on start
+  - Toggling status tooltip/menu visibility
+  - Viewing the About dialog and quitting the application
 
 Closing the main window will, by default, hide it to the tray. Use the tray menu to quit the application.
+
+---
+
+## CLI parameters
+
+The `fc-token` launcher accepts a small set of flags:
+
+```bash
+# Print version and exit
+fc-token --version
+fc-token -V
+
+# Run a lightweight self-test (no full GUI loop)
+fc-token --self-test
+```
 
 ---
 
@@ -166,7 +180,7 @@ The code is structured as a small, modular package:
 - `fc_token.icons` – icon/theme helpers and resource loading.
 - `fc_token.ui.main_window` – main window UI.
 - `fc_token.ui.tray` – system tray integration, scheduling, notifications.
-- `fc_token.ui.dialogs.*` – “About”, “Future codes”, “Refresh interval” dialogs.
+- `fc_token.ui.dialogs.*` – “About”, “Future codes”, “Settings”, and timezone dialogs.
 - `fc_token.ui.application` – Qt application bootstrap and `main()`.
 
 To run from a checkout:
