@@ -206,7 +206,21 @@ class MainWindow(QMainWindow):
             return None
 
         now_utc = datetime.now(timezone.utc)
-        return get_code_for_date(now_utc, list(codes))
+        current_code = get_code_for_date(now_utc, list(codes))
+        if not current_code:
+            return None
+
+        # If the current code is within one hour of expiring, prefer the next code.
+        sorted_codes = sorted(codes, key=lambda entry: entry.start)
+        for idx, entry in enumerate(sorted_codes):
+            if not entry.contains(now_utc):
+                continue
+            if entry.end - now_utc <= timedelta(hours=1):
+                if idx + 1 < len(sorted_codes):
+                    return sorted_codes[idx + 1].code
+            return entry.code
+
+        return current_code
 
     def _update_coverage_summary(self) -> None:
         """Update the cached coverage label using local dates only.

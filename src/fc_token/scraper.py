@@ -74,6 +74,11 @@ _SESSION.headers.update(
 )
 
 
+def _get_session() -> requests.Session:
+    """Return the shared requests session used for scraping."""
+    return _SESSION
+
+
 def clean_token(raw: str) -> str:
     """Extract the actual activation token from a noisy string.
 
@@ -164,7 +169,7 @@ def fetch_codes(url: str = DEFAULT_CODES_URL, *, tz: tzinfo = UTC) -> list[CodeE
         requests.RequestException: if the HTTP request fails.
     """
     headers = {"User-Agent": _get_random_user_agent()}
-    resp = _SESSION.get(url, headers=headers, timeout=15)
+    resp = _get_session().get(url, headers=headers, timeout=15)
     resp.raise_for_status()
     return parse_codes(resp.text, tz=tz)
 
@@ -190,7 +195,7 @@ def fetch_codes_with_identity(
     """
     identity_label, user_agent = _choose_identity()
     headers = {"User-Agent": user_agent}
-    resp = _SESSION.get(url, headers=headers, timeout=15)
+    resp = _get_session().get(url, headers=headers, timeout=15)
     resp.raise_for_status()
 
     body_bytes = len(resp.content or b"")
