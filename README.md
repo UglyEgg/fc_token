@@ -91,6 +91,9 @@ python -m fc_token.installer uninstall --user
 sudo python -m fc_token.installer uninstall --system
 ```
 
+Note: the Python module name uses an underscore (`fc_token`), even though the package name
+uses a hyphen (`fc-token`).
+
 This installs:
 
 - `fc_token.desktop` into `~/.local/share/applications/` (or your chosen prefix)
