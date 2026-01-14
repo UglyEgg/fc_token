@@ -7,31 +7,30 @@ AppDir:
     id: com.filecxx.fc-token
     name: File Centipede Activation Helper
     icon: fc_token
-    version: 0.1.3
-    # We run the console script installed into the venv.
-    exec: usr/venv/bin/fc-token
-    exec_args: $@
+    version: 0.2.0
+    exec: usr/bin/python3.13
+    exec_args: "-m fc_token.app $@"
 
   runtime:
     env:
-      # Make sure the venv binaries are found first.
-      PATH: "$APPDIR/usr/venv/bin:$PATH"
-      # Make Qt behave nicely in some desktop environments.
+      PATH: "${APPDIR}/usr/bin:${PATH}"
+      PYTHONHOME: "${APPDIR}/usr"
+      PYTHONPATH: "${APPDIR}/usr/lib/python3.13/site-packages:${APPDIR}/usr/lib/python3.13"
+      SSL_CERT_FILE: "${APPDIR}/usr/lib/python3.13/site-packages/certifi/cacert.pem"
       QT_QPA_PLATFORMTHEME: "qt6ct"
 
-  # Base system dependencies to pull in via apt.
-  # Tune distro / versions as needed for your build host.
   apt:
     arch: amd64
     sources:
       - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy main universe"
       - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy-updates main universe"
+      - sourceline: "deb http://ppa.launchpad.net/deadsnakes/ppa/ubuntu jammy main"
+        key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBA6932366A755776"
     include:
-      - python3
-      - python3-venv
-      - python3-pip
-      - python3-distutils
-      - python3-pyqt6
+      - python3.13
+      - python3.13-venv
+      - ca-certificates
+      # GUI/runtime libs typically needed by Qt/PyQt wheels on Linux:
       - libgl1
       - libx11-6
       - libxext6
@@ -40,48 +39,56 @@ AppDir:
       - libxkbcommon0
       - libdbus-1-3
       - libglib2.0-0
-      - ca-certificates
     exclude:
       - "*-dev"
       - "*-dbg"
 
   files:
     include:
-      # Python + Qt libraries brought in by apt above.
-      - /usr/bin/python3
       - /usr/lib/x86_64-linux-gnu
-      - /usr/lib/python3
       - /usr/share/icons
-      - /usr/share/qt6
     exclude:
       - /usr/share/doc
       - /usr/share/man
       - /usr/share/locale/*
       - /usr/share/icons/Adwaita
 
-  # Build script: create a venv inside the AppDir and install this project.
-  script:
-    - |
-      set -e
-      echo "[fc-token] Creating virtualenv under AppDir/usr/venv"
-      python3 -m venv "$APPDIR/usr/venv"
-      "$APPDIR/usr/venv/bin/pip" install --upgrade pip wheel
-      echo "[fc-token] Installing project into venv"
-      "$APPDIR/usr/venv/bin/pip" install .
+  after_bundle: |
+    set -euo pipefail
+
+    # appimage-builder provides TARGET_APPDIR; use it (not $APPDIR).
+    APPDIR="$TARGET_APPDIR"
+    export PATH="$APPDIR/usr/bin:$PATH"
+    export PYTHONHOME="$APPDIR/usr"
+    export PYTHONPATH="$APPDIR/usr/lib/python3.13/site-packages:$APPDIR/usr/lib/python3.13"
+
+    echo "[fc-token] Ensure pip is available in bundled python"
+    "$APPDIR/usr/bin/python3.13" -m ensurepip --upgrade || true
+    "$APPDIR/usr/bin/python3.13" -m pip install --upgrade --no-input pip wheel setuptools
+
+    echo "[fc-token] Install project into AppDir (/usr prefix)"
+    cd "$SOURCE_DIR"
+    "$APPDIR/usr/bin/python3.13" -m pip install \
+      --no-input \
+      --upgrade \
+      --ignore-installed \
+      --prefix=/usr \
+      --root="$APPDIR" \
+      .
+
+  test:
+    smoke:
+      image: ubuntu:jammy
+      command: "./AppRun --version"
+      env:
+        QT_QPA_PLATFORM: "offscreen"
+    self_test:
+      image: ubuntu:jammy
+      command: "./AppRun --self-test"
+      env:
+        QT_QPA_PLATFORM: "offscreen"
 
 AppImage:
   arch: x86_64
-
-  # Fill this in if you later want zsync-based updates.
   update-information: ""
-  sign-key: null
-
-  test:
-    - path: AppDir
-      command: usr/venv/bin/fc-token --version
-      env:
-        QT_QPA_PLATFORM: "offscreen"
-    - path: AppDir
-      command: usr/venv/bin/fc-token --self-test
-      env:
-        QT_QPA_PLATFORM: "offscreen"
+  # sign-key: null
