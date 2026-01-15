@@ -19,9 +19,11 @@ from fc_token.ui.tray import TrayController
 def _desktop_file_exists() -> bool:
     """Return True when the .desktop file is installed in an XDG applications dir."""
     desktop_filename = Path(DESKTOP_FILENAME).name
+    data_home_env = os.environ.get("XDG_DATA_HOME")
     data_home = (
-        Path(os.environ.get("XDG_DATA_HOME", ""))
-        or Path.home() / ".local" / "share"
+        Path(data_home_env)
+        if data_home_env
+        else Path.home() / ".local" / "share"
     )
     data_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
     search_dirs = [data_home] + [Path(path) for path in data_dirs.split(":") if path]

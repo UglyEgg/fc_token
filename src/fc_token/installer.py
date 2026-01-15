@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 
+from fc_token.config import DESKTOP_EXEC
 from fc_token.config import DESKTOP_FILENAME
 from fc_token.desktop_entry import build_launcher_desktop
 
@@ -102,7 +103,11 @@ def copy_file(src: Path, dst: Path) -> None:
 def install_launcher(target: InstallTarget) -> None:
     """Install the .desktop file and icons into the given target."""
     print(f"[fc-token] Installing desktop file into {target.applications_dir}")
-    write_text_file(target.desktop_target, build_launcher_desktop())
+    content = build_launcher_desktop()
+    exec_path = shutil.which(DESKTOP_EXEC)
+    if exec_path:
+        content = _replace_desktop_exec(content, exec_path)
+    write_text_file(target.desktop_target, content)
 
     print(f"[fc-token] Installing icons into {target.icons_dir}")
     png_src = find_resource(ICON_PNG_NAME)
@@ -177,13 +182,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _replace_desktop_exec(content: str, exec_path: str) -> str:
+    """Replace the Exec line in a .desktop file content string."""
+    lines = []
+    replaced = False
+    for line in content.splitlines():
+        if line.startswith("Exec=") and not replaced:
+            lines.append(f"Exec={exec_path}")
+            replaced = True
+        else:
+            lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
 def target_from_args(args: argparse.Namespace) -> InstallTarget:
     """Create an InstallTarget from parsed arguments."""
     if args.user or not args.system:
         # Default: user-local
+        data_home_env = os.environ.get("XDG_DATA_HOME")
         base = (
-            Path(os.environ.get("XDG_DATA_HOME", ""))
-            or Path.home() / ".local" / "share"
+            Path(data_home_env)
+            if data_home_env
+            else Path.home() / ".local" / "share"
         )
         return InstallTarget(prefix=base)
 
