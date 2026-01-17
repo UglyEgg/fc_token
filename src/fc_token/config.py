@@ -12,7 +12,7 @@ class AppConfig:
 
     # User-facing metadata
     app_name: str = "File Centipede Activation Helper"
-    version: str = "0.2.0"
+    version: str = "0.3.0"
 
     # URLs
     file_centipede_url: str = "https://filecxx.com/"
