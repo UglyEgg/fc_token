@@ -164,7 +164,7 @@ class CodeCache:
         fresh: list[CodeEntry] = []
         if use_network:
             try:
-                fresh, identity, raw_bytes = fetch_codes_with_identity(url, tz=self.tz)
+                fresh, identity, raw_bytes = fetch_codes_with_identity(url)
                 self.last_identity_used = identity
                 self.last_scrape_raw_bytes = int(raw_bytes)
                 self.last_scraped_codes_count = len(fresh)

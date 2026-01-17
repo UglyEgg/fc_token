@@ -46,6 +46,7 @@ from fc_token.ui.dialogs.timezone import run_timezone_dialog
 from fc_token.ui.dialogs.settings import run_settings_dialog
 from fc_token.ui.utils import get_local_zone_name, get_local_zone
 from fc_token.ui.workers import RefreshWorker
+from fc_token.scraper import refresh_source_timezone
 
 # Minimum allowed refresh interval (minutes) between *online* scrapes.
 # Global anti-abuse floor: 6 hours.
@@ -1009,6 +1010,7 @@ class TrayController:
 
         # Refresh cached tzinfo & UI
         self._refresh_timezone_cache()
+        refresh_source_timezone()
 
         # Refresh view from cache; no network access needed for tz-only change.
         changed = self.window.refresh_from_cache(initial=False)
