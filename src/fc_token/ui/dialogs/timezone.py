@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 )
 
 from fc_token.config import DEFAULT_TIMEZONE
-from fc_token.ui.utils import get_local_zone_name
+from fc_token.timezone_utils import resolve_local_timezone
 
 # Cache the full timezone list once at import time to avoid repeated
 # calls to available_timezones() each time the dialog is opened.
@@ -24,7 +24,9 @@ def run_timezone_dialog(parent: QWidget | None = None) -> str | None:
 
     Returns the selected timezone name (IANA string) or None if cancelled.
     """
-    current_tz_name = get_local_zone_name(DEFAULT_TIMEZONE)
+    resolved_tz = resolve_local_timezone(DEFAULT_TIMEZONE)
+    current_tz_name = resolved_tz.display_name
+    current_tz_key = resolved_tz.canonical_name or DEFAULT_TIMEZONE
 
     # Use the cached global list
     all_tzs = ALL_TIMEZONES
@@ -41,7 +43,7 @@ def run_timezone_dialog(parent: QWidget | None = None) -> str | None:
 
     # Preselect current tz if present
     try:
-        idx = all_tzs.index(current_tz_name)
+        idx = all_tzs.index(current_tz_key)
     except ValueError:
         idx = -1
 

@@ -62,7 +62,6 @@ USER_AGENTS: List[str] = [
 
 _SOURCE_TIMEZONE: tzinfo | None = None
 _SOURCE_TIMEZONE_NAME: str | None = None
-_LAST_PARSED_TZ_KEY: str | None = None
 
 
 def _get_source_timezone() -> tzinfo:
@@ -185,49 +184,6 @@ def _parse_codes_with_timezone(html: str, tz: tzinfo) -> list[CodeEntry]:
     return codes
 
 
-def _score_codes(codes: list[CodeEntry], now_utc: datetime) -> tuple[int, float]:
-    """Return a score tuple for selecting the best timezone parse."""
-    if not codes:
-        return (2, float("inf"), 0)
-
-    nearest = float("inf")
-    active = False
-    future_count = 0
-    for entry in codes:
-        if entry.start <= now_utc <= entry.end:
-            active = True
-            nearest = 0.0
-            break
-        if entry.end >= now_utc:
-            future_count += 1
-        if now_utc < entry.start:
-            delta = (entry.start - now_utc).total_seconds()
-        else:
-            delta = (now_utc - entry.end).total_seconds()
-        if delta < nearest:
-            nearest = delta
-
-    return (0 if active else 1, nearest, -future_count)
-
-
-def _unique_timezones(candidates: list[tzinfo]) -> list[tzinfo]:
-    """Return timezones, removing duplicates by key/repr."""
-    unique: list[tzinfo] = []
-    seen: set[str] = set()
-    for tz in candidates:
-        key = getattr(tz, "key", None) or str(tz)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(tz)
-    return unique
-
-
-def _tz_key(value: tzinfo) -> str:
-    """Return a stable identifier for the timezone."""
-    return getattr(value, "key", None) or str(value)
-
-
 def parse_codes(html: str, *, tz: tzinfo | None = None) -> list[CodeEntry]:
     """Parse activation codes from the HTML page text.
 
@@ -239,45 +195,12 @@ def parse_codes(html: str, *, tz: tzinfo | None = None) -> list[CodeEntry]:
     Codes may span multiple lines; non-empty lines following the date range
     are concatenated until the next date range or end of input. Parsed
     timestamps are converted to UTC for internal storage.
+
+    When no timezone is provided, the configured File Centipede source
+    timezone is treated as authoritative.
     """
-    if tz is not None:
-        return _parse_codes_with_timezone(html, tz)
-
-    global _LAST_PARSED_TZ_KEY
-    local_tz = datetime.now().astimezone().tzinfo
-    candidates = _unique_timezones(
-        [
-            tzinfo_item
-            for tzinfo_item in (_get_source_timezone(), UTC, local_tz)
-            if tzinfo_item
-        ]
-    )
-    if _LAST_PARSED_TZ_KEY is not None:
-        for tzinfo_item in candidates:
-            if _tz_key(tzinfo_item) == _LAST_PARSED_TZ_KEY:
-                candidates = [tzinfo_item] + [
-                    candidate
-                    for candidate in candidates
-                    if _tz_key(candidate) != _LAST_PARSED_TZ_KEY
-                ]
-                break
-
-    now_utc = datetime.now(UTC)
-    best_codes: list[CodeEntry] = []
-    best_score = (2, float("inf"), 0)
-    best_candidate: tzinfo | None = None
-    for candidate in candidates:
-        parsed = _parse_codes_with_timezone(html, candidate)
-        score = _score_codes(parsed, now_utc)
-        if score < best_score:
-            best_score = score
-            best_codes = parsed
-            best_candidate = candidate
-
-    if best_candidate is not None:
-        _LAST_PARSED_TZ_KEY = _tz_key(best_candidate)
-
-    return best_codes
+    effective_tz = tz if tz is not None else _get_source_timezone()
+    return _parse_codes_with_timezone(html, effective_tz)
 
 
 def fetch_codes(

@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from fc_token.config import DEFAULT_TIMEZONE
-from fc_token.ui.utils import get_local_zone_name
+from fc_token.timezone_utils import get_local_zone, get_local_zone_name
 
 if TYPE_CHECKING:
     from fc_token.ui.tray import TrayController
@@ -191,8 +191,6 @@ class SettingsDialog(QDialog):
                 "network availability."
             )
         else:
-            from fc_token.ui.utils import get_local_zone
-
             local_zone = get_local_zone(DEFAULT_TIMEZONE)
             next_local = next_allowed_utc.astimezone(local_zone)
             next_time_str = next_local.strftime("%b %d, %Y %I:%M %p")

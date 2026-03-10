@@ -24,7 +24,8 @@ from fc_token.config import (
 from fc_token.icons import load_app_icon, is_dark_theme
 from fc_token.models import CodeEntry
 from fc_token.scraper import get_code_for_date
-from fc_token.ui.utils import get_local_zone, make_code_view
+from fc_token.timezone_utils import get_local_zone
+from fc_token.ui.utils import make_code_view
 
 
 class MainWindow(QMainWindow):

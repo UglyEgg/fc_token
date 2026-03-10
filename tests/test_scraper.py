@@ -56,6 +56,30 @@ class ScraperTests(unittest.TestCase):
         self.assertEqual(codes[0].code, "ABCDEF")
         self.assertEqual(codes[1].code, "GHIJK")
 
+    def test_parse_codes_defaults_to_source_timezone(self) -> None:
+        """parse_codes defaults to the configured source timezone."""
+        html = "2024-01-01 00:00:00 - 2024-01-01 01:00:00\nTOKEN123\n"
+
+        codes = parse_codes(html)
+
+        self.assertEqual(len(codes), 1)
+        self.assertEqual(codes[0].start, datetime(2023, 12, 31, 16, 0, 0, tzinfo=UTC))
+        self.assertEqual(codes[0].end, datetime(2023, 12, 31, 17, 0, 0, tzinfo=UTC))
+
+    def test_fetch_codes_with_identity_defaults_to_source_timezone(self) -> None:
+        """Network parsing uses the configured source timezone by default."""
+        html = "2024-01-01 00:00:00 - 2024-01-01 01:00:00\nTOKEN123\n"
+        fake_response = FakeResponse(html)
+
+        with patch("fc_token.scraper._choose_identity", return_value=("Test", "UA")):
+            with patch("fc_token.scraper._SESSION.get", return_value=fake_response):
+                codes, identity, raw_bytes = fetch_codes_with_identity("http://example.com")
+
+        self.assertEqual(identity, "Test")
+        self.assertEqual(raw_bytes, len(html.encode("utf-8")))
+        self.assertEqual(codes[0].start, datetime(2023, 12, 31, 16, 0, 0, tzinfo=UTC))
+        self.assertEqual(codes[0].end, datetime(2023, 12, 31, 17, 0, 0, tzinfo=UTC))
+
     def test_clean_token_prefers_long_match(self) -> None:
         """clean_token extracts the first long token run when present."""
         token = "A" * 40

@@ -44,7 +44,7 @@ from fc_token.ui.devtools import (
 from fc_token.ui.dialogs.about import show_about_dialog
 from fc_token.ui.dialogs.timezone import run_timezone_dialog
 from fc_token.ui.dialogs.settings import run_settings_dialog
-from fc_token.ui.utils import get_local_zone_name, get_local_zone
+from fc_token.timezone_utils import get_local_zone, get_local_zone_name
 from fc_token.ui.workers import RefreshWorker
 from fc_token.scraper import refresh_source_timezone
 

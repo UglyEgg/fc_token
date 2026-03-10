@@ -22,7 +22,7 @@ class AppConfig:
     # Optional project page (UI "About" dialog references it)
     project_url: str = "https://github.com/UglyEgg/fc_token"
 
-    # Default local timezone (used when environment TIMEZONE is not set)
+    # Default local timezone used only after settings, env, and system lookup fail
     default_timezone: str = "UTC"
     # Timezone used by the File Centipede site (source timestamps)
     source_timezone: str = "Asia/Shanghai"
