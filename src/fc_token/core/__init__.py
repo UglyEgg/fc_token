@@ -16,7 +16,7 @@ from .source import (
     SourceNetworkError,
     SourceParseError,
 )
-from .storage import FetchRunRecord, SQLiteTokenStore
+from .storage import FetchRunRecord, SQLiteTokenStore, StatisticsSnapshot
 
 __all__ = [
     "ActivationSourceClient",
@@ -29,6 +29,7 @@ __all__ = [
     "RefreshStateKind",
     "RefreshTrigger",
     "SQLiteTokenStore",
+    "StatisticsSnapshot",
     "SourceFetchError",
     "SourceFetchResult",
     "SourceNetworkError",

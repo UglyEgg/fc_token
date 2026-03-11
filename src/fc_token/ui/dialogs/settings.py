@@ -11,10 +11,10 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QVBoxLayout,
-    QMessageBox,
 )
 
 from fc_token.config import DEFAULT_TIMEZONE
@@ -42,7 +42,6 @@ class SettingsDialog(QDialog):
 
         main_layout = QVBoxLayout(self)
 
-        # --- Refresh group -------------------------------------------------
         refresh_group = QGroupBox("Refresh")
         refresh_layout = QVBoxLayout(refresh_group)
 
@@ -63,11 +62,9 @@ class SettingsDialog(QDialog):
 
         main_layout.addWidget(refresh_group)
 
-        # --- Time & appearance group --------------------------------------
         time_group = QGroupBox("Time && appearance")
         time_layout = QVBoxLayout(time_group)
 
-        # Timezone row
         tz_row = QHBoxLayout()
         self.lbl_timezone = QLabel()
         tz_row.addWidget(self.lbl_timezone)
@@ -79,7 +76,6 @@ class SettingsDialog(QDialog):
         time_layout.addLayout(tz_row)
         self._update_timezone_label()
 
-        # Tray icon theme (stacked radios)
         icon_group = QGroupBox("Tray icon theme")
         icon_layout = QVBoxLayout(icon_group)
 
@@ -103,11 +99,9 @@ class SettingsDialog(QDialog):
 
         main_layout.addWidget(time_group)
 
-        # --- Integration & UI group ---------------------------------------
         integration_group = QGroupBox("Integration && UI")
         integration_layout = QVBoxLayout(integration_group)
 
-        # Desktop integration checkbox
         self._initial_desktop_integrated = getattr(
             tray, "is_desktop_integrated", lambda: False
         )()
@@ -115,17 +109,14 @@ class SettingsDialog(QDialog):
         self.chk_integrate_desktop.setChecked(self._initial_desktop_integrated)
         integration_layout.addWidget(self.chk_integrate_desktop)
 
-        # Start on login
         self.chk_autostart = QCheckBox("Start on login")
         self.chk_autostart.setChecked(tray.is_autostart_enabled())
         integration_layout.addWidget(self.chk_autostart)
 
-        # Open main window on start
         self.chk_open_on_start = QCheckBox("Open main window on start")
         self.chk_open_on_start.setChecked(getattr(tray, "open_on_start", True))
         integration_layout.addWidget(self.chk_open_on_start)
 
-        # UI visibility
         self.chk_show_tooltip = QCheckBox("Show detailed status tooltip")
         self.chk_show_tooltip.setChecked(tray.show_tooltip)
         integration_layout.addWidget(self.chk_show_tooltip)
@@ -136,7 +127,6 @@ class SettingsDialog(QDialog):
 
         main_layout.addWidget(integration_group)
 
-        # --- Advanced group ------------------------------------------------
         advanced_group = QGroupBox("Advanced")
         advanced_layout = QVBoxLayout(advanced_group)
 
@@ -153,7 +143,6 @@ class SettingsDialog(QDialog):
 
         main_layout.addWidget(advanced_group)
 
-        # --- Dialog buttons ------------------------------------------------
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -162,20 +151,13 @@ class SettingsDialog(QDialog):
         main_layout.addWidget(buttons)
 
         self.setLayout(main_layout)
-
-        # Comfortable default size
-        self.resize(700, 722)
-
-    # ------------------------------------------------------------------ #
-    # Helpers
-    # ------------------------------------------------------------------ #
+        self.resize(560, 520)
 
     def _update_timezone_label(self) -> None:
         tz_name = get_local_zone_name(DEFAULT_TIMEZONE)
         self.lbl_timezone.setText(f"Timezone: {tz_name}")
 
     def _on_change_timezone_clicked(self) -> None:
-        # Delegate to tray's existing logic
         self.tray.change_timezone()
         self._update_timezone_label()
 
@@ -228,10 +210,8 @@ class SettingsDialog(QDialog):
             )
 
     def _apply_and_close(self) -> None:
-        # Refresh: auto-refresh flag
         self.tray.toggle_auto_refresh(self.chk_auto_refresh.isChecked())
 
-        # Time & appearance: icon mode
         if self.radio_icon_light.isChecked():
             self.tray.set_icon_mode("light")
         elif self.radio_icon_dark.isChecked():
@@ -239,19 +219,14 @@ class SettingsDialog(QDialog):
         else:
             self.tray.set_icon_mode("auto")
 
-        # Integration & UI: desktop integration
         new_integrated = self.chk_integrate_desktop.isChecked()
         if new_integrated != self._initial_desktop_integrated:
-            # Only perform install/uninstall if the state actually changed
             self.tray.set_desktop_integration_enabled(new_integrated)
 
-        # Start on login
         autostart_enabled = self.chk_autostart.isChecked()
         self.tray.set_autostart_enabled(autostart_enabled)
 
-        # Open main window on start
         self.tray.toggle_open_on_start(self.chk_open_on_start.isChecked())
-
         self.tray.toggle_show_tooltip(self.chk_show_tooltip.isChecked())
         self.tray.toggle_show_menu_info(self.chk_show_menu_info.isChecked())
 

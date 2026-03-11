@@ -27,10 +27,13 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QTextEdit,
+    QTabWidget,
     QVBoxLayout,
 )
 
-from fc_token.config import APP_NAME, APP_VERSION
+from fc_token.config import APP_NAME, APP_VERSION, DEFAULT_TIMEZONE
+from fc_token.diagnostics import format_diagnostics_snapshot_html
+from fc_token.timezone_utils import get_local_zone, get_local_zone_name
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checking
     from fc_token.ui.tray import TrayController
@@ -1146,29 +1149,62 @@ class DevTools:
         )
         return html
 
-    def show_compact_stats_dialog(self) -> None:
-        """Show a small, read-only status dialog (for non-dev Easter egg)."""
-        text = self.build_compact_stats_text()  # now HTML
-
+    def show_hidden_status_dialog(self) -> None:
+        """Show the hidden status dialog with separate statistics and diagnostics tabs."""
         dlg = QDialog(self.c.window)
-        dlg.setWindowTitle("File Centipede helper – Status")
+        dlg.setWindowTitle("Helper status")
 
         layout = QVBoxLayout(dlg)
-        editor = QTextEdit(dlg)
-        editor.setReadOnly(True)
-        editor.setHtml(text)
-        layout.addWidget(editor)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Close,
-            parent=dlg,
+        intro = QLabel(
+            "Local usage statistics and persisted refresh diagnostics."
         )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        tabs = QTabWidget(dlg)
+
+        statistics_editor = QTextEdit(dlg)
+        statistics_editor.setReadOnly(True)
+        statistics_editor.setHtml(self.build_compact_stats_text())
+        tabs.addTab(statistics_editor, "📊 Statistics")
+
+        diagnostics_snapshot = self.c.cache.get_diagnostics(limit=8)
+        local_zone = get_local_zone(DEFAULT_TIMEZONE)
+        local_zone_name = get_local_zone_name(DEFAULT_TIMEZONE)
+
+        diagnostics_editor = QTextEdit(dlg)
+        diagnostics_editor.setReadOnly(True)
+        diagnostics_editor.setHtml(
+            format_diagnostics_snapshot_html(
+                diagnostics_snapshot,
+                local_tz=local_zone,
+                local_tz_name=local_zone_name,
+            )
+        )
+        tabs.addTab(diagnostics_editor, "🩺 Diagnostics")
+
+        layout.addWidget(tabs)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dlg)
+        copy_btn = buttons.addButton("Copy current tab", QDialogButtonBox.ButtonRole.ActionRole)
         buttons.rejected.connect(dlg.reject)
         buttons.accepted.connect(dlg.accept)
+
+        def do_copy() -> None:
+            current = tabs.currentWidget()
+            if isinstance(current, QTextEdit):
+                QApplication.clipboard().setText(current.toPlainText())
+
+        copy_btn.clicked.connect(do_copy)
         layout.addWidget(buttons)
 
-        dlg.resize(600, 260)
+        dlg.resize(760, 620)
         dlg.exec()
+
+    def show_compact_stats_dialog(self) -> None:
+        """Compatibility wrapper for callers still using the old Easter-egg name."""
+        self.show_hidden_status_dialog()
 
     # ------------------------------------------------------------------
     # Nag-screen helpers

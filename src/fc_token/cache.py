@@ -15,7 +15,12 @@ from typing import List, Sequence
 
 from PyQt6.QtCore import QStandardPaths
 
-from .core.storage import FetchRunRecord, SQLiteTokenStore
+from .core.storage import (
+    DiagnosticsSnapshot,
+    FetchRunRecord,
+    SQLiteTokenStore,
+    StatisticsSnapshot,
+)
 from .models import CodeEntry, UTC
 
 
@@ -25,6 +30,7 @@ class CodeCache:
 
     app_name: str = "fc_token"
     tz: tzinfo = UTC
+    max_fetch_runs: int = 100
     cache_dir: Path | None = field(init=False, default=None)
     cache_path: Path | None = field(init=False, default=None)
     legacy_cache_path: Path | None = field(init=False, default=None)
@@ -55,19 +61,10 @@ class CodeCache:
         )
 
     def _hydrate_metadata_from_store(self) -> None:
-        self.last_identity_used = self._store.get_app_state("last_identity_used")
-        raw_bytes = self._store.get_app_state("last_scrape_raw_bytes")
-        codes_count = self._store.get_app_state("last_scraped_codes_count")
-        try:
-            self.last_scrape_raw_bytes = None if raw_bytes is None else int(raw_bytes)
-        except (TypeError, ValueError):
-            self.last_scrape_raw_bytes = None
-        try:
-            self.last_scraped_codes_count = (
-                0 if codes_count is None else int(codes_count)
-            )
-        except (TypeError, ValueError):
-            self.last_scraped_codes_count = 0
+        diagnostics = self._store.load_diagnostics(limit=1)
+        self.last_identity_used = diagnostics.last_identity_used
+        self.last_scrape_raw_bytes = diagnostics.last_scrape_raw_bytes
+        self.last_scraped_codes_count = diagnostics.last_scraped_codes_count
 
     def _load_from_disk(self) -> list[CodeEntry]:
         return self._store.load_codes()
@@ -76,23 +73,16 @@ class CodeCache:
         self._store.save_codes(codes)
 
     def _persist_refresh_metadata(
-        self, *, fetched_at_utc: datetime, success: bool = True
+        self,
+        *,
+        fetched_at_utc: datetime,
+        success: bool,
+        error_kind: str | None = None,
+        error_message: str | None = None,
+        http_status: int | None = None,
+        duration_ms: int | None = None,
     ) -> None:
-        self._store.set_app_state("last_identity_used", self.last_identity_used or "")
-        self._store.set_app_state(
-            "last_scrape_raw_bytes",
-            ""
-            if self.last_scrape_raw_bytes is None
-            else str(self.last_scrape_raw_bytes),
-        )
-        self._store.set_app_state(
-            "last_scraped_codes_count", str(self.last_scraped_codes_count)
-        )
-        self._store.set_app_state(
-            "last_refresh_utc",
-            fetched_at_utc.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S"),
-        )
-        self._store.record_fetch_run(
+        self._store.record_refresh_outcome(
             FetchRunRecord(
                 started_utc=fetched_at_utc,
                 finished_utc=fetched_at_utc,
@@ -100,7 +90,12 @@ class CodeCache:
                 identity_label=self.last_identity_used,
                 raw_bytes=self.last_scrape_raw_bytes,
                 code_count=self.last_scraped_codes_count,
-            )
+                http_status=http_status,
+                error_kind=error_kind,
+                error_message=error_message,
+                duration_ms=duration_ms,
+            ),
+            max_fetch_runs=self.max_fetch_runs,
         )
 
     def get_codes(self) -> list[CodeEntry]:
@@ -157,11 +152,42 @@ class CodeCache:
 
         from .core.source import ActivationSourceClient
 
-        result = ActivationSourceClient().fetch_codes(url)
+        started_at = self._now()
+        try:
+            result = ActivationSourceClient().fetch_codes(url)
+        except Exception as exc:
+            self.last_scraped_codes_count = 0
+            self._persist_refresh_metadata(
+                fetched_at_utc=started_at,
+                success=False,
+                error_kind=exc.__class__.__name__,
+                error_message=str(exc),
+            )
+            raise
+
         self.last_identity_used = result.identity_label
         self.last_scrape_raw_bytes = result.raw_bytes
         self.last_scraped_codes_count = len(result.codes)
         return self.merge_and_save(result.codes, now=result.fetched_at_utc)
+
+    def get_diagnostics(self, *, limit: int = 10) -> DiagnosticsSnapshot:
+        diagnostics = self._store.load_diagnostics(limit=limit)
+        self.last_identity_used = diagnostics.last_identity_used
+        self.last_scrape_raw_bytes = diagnostics.last_scrape_raw_bytes
+        self.last_scraped_codes_count = diagnostics.last_scraped_codes_count
+        return diagnostics
+
+    def get_statistics(self, *, limit: int = 200) -> StatisticsSnapshot:
+        return self._store.load_statistics(limit=limit)
+
+    def ensure_installation_timestamp(self, value: datetime) -> str:
+        return self._store.ensure_installation_timestamp(value)
+
+    def add_foreground_seconds(self, seconds: int) -> None:
+        self._store.add_foreground_seconds(seconds)
+
+    def apply_retention(self) -> None:
+        self._store.enforce_retention(max_fetch_runs=self.max_fetch_runs)
 
     def _now(self) -> datetime:
         return datetime.now(self.tz)

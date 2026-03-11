@@ -28,18 +28,18 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 LICENSE_URL = "https://www.gnu.org/licenses/agpl-3.0.html#license-text"
-
-# Keep a single instance of the About dialog.
 _about_dialog: QDialog | None = None
 
 
 class ClickableLabel(QLabel):
-    """A QLabel that emits a clicked() signal when left-clicked."""
+    """A QLabel that emits click signals when left-clicked."""
 
     clicked = pyqtSignal()
+    clicked_with_modifiers = pyqtSignal(object)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked_with_modifiers.emit(event.modifiers())
             self.clicked.emit()
         super().mousePressEvent(event)
 
@@ -48,29 +48,21 @@ def show_about_dialog(
     parent: QWidget | None = None,
     tray: "TrayController | None" = None,
 ) -> None:
-    """Show the About dialog (singleton).
-
-    If an About window is already open, bring it to front instead of creating
-    a second one.
-    """
+    """Show the About dialog (singleton)."""
     global _about_dialog
 
-    # If there's an existing visible dialog, just focus it.
     if _about_dialog is not None:
         if _about_dialog.isVisible():
             _about_dialog.raise_()
             _about_dialog.activateWindow()
             return
-        else:
-            # It exists but isn't visible anymore; clean it up.
-            _about_dialog.deleteLater()
-            _about_dialog = None
+        _about_dialog.deleteLater()
+        _about_dialog = None
 
     dlg = QDialog(parent)
     dlg.setWindowTitle(f"About {APP_NAME}")
     dlg.setMinimumWidth(420)
 
-    # When this dialog finishes, clear the global reference.
     def on_finished(_result: int) -> None:
         global _about_dialog
         _about_dialog = None
@@ -79,9 +71,6 @@ def show_about_dialog(
 
     layout = QVBoxLayout(dlg)
 
-    # ------------------------------------------------------------
-    # Header: App icon + Title / Version
-    # ------------------------------------------------------------
     header = QHBoxLayout()
 
     app_icon = load_app_icon()
@@ -91,13 +80,10 @@ def show_about_dialog(
         header.addWidget(icon_lbl, alignment=Qt.AlignmentFlag.AlignTop)
 
     header_text_layout = QVBoxLayout()
-
-    # Title
     title_lbl = QLabel(f"<h2>{APP_NAME}</h2>")
     title_lbl.setTextFormat(Qt.TextFormat.RichText)
     header_text_layout.addWidget(title_lbl)
 
-    # Version under title, slightly larger than body text (from config)
     version_lbl = QLabel(f'<span style="font-size:11pt;">Version {APP_VERSION}</span>')
     version_lbl.setTextFormat(Qt.TextFormat.RichText)
     header_text_layout.addWidget(version_lbl)
@@ -105,12 +91,8 @@ def show_about_dialog(
     header_text_layout.addStretch()
     header.addLayout(header_text_layout)
     header.addStretch()
-
     layout.addLayout(header)
 
-    # ------------------------------------------------------------
-    # Description block with separators
-    # ------------------------------------------------------------
     desc_html = """
         <hr/>
         <p>This helper fetches and manages File Centipede activation codes
@@ -128,11 +110,7 @@ def show_about_dialog(
     desc_lbl.setTextFormat(Qt.TextFormat.RichText)
     layout.addWidget(desc_lbl)
 
-    # ------------------------------------------------------------
-    # File Centipede links + "ugly egg" logo row
-    # ------------------------------------------------------------
     fc_row = QHBoxLayout()
-
     links_layout = QVBoxLayout()
 
     visit_lbl = QLabel(
@@ -152,7 +130,6 @@ def show_about_dialog(
     links_layout.addStretch()
     fc_row.addLayout(links_layout, stretch=1)
 
-    # Right side: the ugly egg logo (clickable)
     logo_lbl = ClickableLabel()
     logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -176,9 +153,6 @@ def show_about_dialog(
 
     layout.addLayout(fc_row)
 
-    # Clicking the egg shows an enlarged version of the image in a popup.
-    # In the enlarged dialog, hovering shows a tooltip; clicking runs the
-    # compact stats Easter egg (if dev_tools is available on the tray).
     def show_large_logo() -> None:
         nonlocal logo_pix_full
         if logo_pix_full is None:
@@ -193,25 +167,28 @@ def show_about_dialog(
         logo_dlg.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         v = QVBoxLayout(logo_dlg)
 
-        # Big clickable egg
         big_lbl = ClickableLabel()
         big_pix = logo_pix_full.scaledToWidth(
             256, Qt.TransformationMode.SmoothTransformation
         )
         big_lbl.setPixmap(big_pix)
         big_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Easter-egg tooltip (always shown, dev or non-dev)
-        big_lbl.setToolTip("Some eggs are just ugly")
         v.addWidget(big_lbl)
 
-        def on_big_clicked() -> None:
-            # Close the large-logo dialog first
+        def on_big_clicked(modifiers) -> None:
             logo_dlg.accept()
-            # Then show the compact stats if available
-            if tray is not None and getattr(tray, "dev_tools", None) is not None:
-                tray.dev_tools.show_compact_stats_dialog()
+            ctrl_shift = bool(modifiers & Qt.KeyboardModifier.ControlModifier) and bool(
+                modifiers & Qt.KeyboardModifier.ShiftModifier
+            )
+            if tray is None:
+                return
+            if ctrl_shift:
+                tray.enable_dev_mode()
+                return
+            if getattr(tray, "dev_tools", None) is not None:
+                tray.dev_tools.show_hidden_status_dialog()
 
-        big_lbl.clicked.connect(on_big_clicked)
+        big_lbl.clicked_with_modifiers.connect(on_big_clicked)
 
         close_btn_logo = QPushButton("Close")
         close_btn_logo.clicked.connect(logo_dlg.accept)
@@ -222,9 +199,6 @@ def show_about_dialog(
 
     logo_lbl.clicked.connect(show_large_logo)
 
-    # ------------------------------------------------------------
-    # License line under the File Centipede links row
-    # ------------------------------------------------------------
     license_lbl = QLabel(
         f"<b>License:</b> "
         f'<a href="{LICENSE_URL}">GNU Affero General Public License v3.0 (AGPL-3.0)</a>'
@@ -233,13 +207,8 @@ def show_about_dialog(
     license_lbl.setOpenExternalLinks(True)
     layout.addWidget(license_lbl)
 
-    # ------------------------------------------------------------
-    # Bottom: GitHub (left) + Close (right)
-    # ------------------------------------------------------------
     btn_row = QHBoxLayout()
-
     project_url = PROJECT_URL
-
     if project_url:
         github_btn = QPushButton("GitHub")
 
@@ -249,7 +218,6 @@ def show_about_dialog(
         github_btn.clicked.connect(open_github)
         btn_row.addWidget(github_btn)
 
-    # Stretch after GitHub so Close is pushed to the right
     btn_row.addStretch()
 
     close_btn = QPushButton("Close")
@@ -257,7 +225,6 @@ def show_about_dialog(
     btn_row.addWidget(close_btn)
     layout.addLayout(btn_row)
 
-    # Show and keep the global reference
     _about_dialog = dlg
     dlg.show()
     dlg.raise_()
