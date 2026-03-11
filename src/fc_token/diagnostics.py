@@ -91,27 +91,17 @@ def format_diagnostics_snapshot(
     return "\n".join(lines)
 
 
-def _status_chip(status: str | None) -> str:
+def _status_label(status: str | None) -> str:
     normalized = (status or "unknown").lower()
     if normalized == "success":
-        color = "#2e7d32"
-        emoji = "✅"
-    elif normalized == "failure":
-        color = "#c62828"
-        emoji = "❌"
-    else:
-        color = "#b26a00"
-        emoji = "⚪"
-    return f"<span style=\"color:{color}; font-weight:600;\">{emoji} {html.escape(normalized)}</span>"
+        return "✅ success"
+    if normalized == "failure":
+        return "❌ failure"
+    return f"⚪ {normalized}"
 
 
-def _row_html(label: str, value: str) -> str:
-    return (
-        "<tr>"
-        f"<td style=\"padding:2px 12px 2px 0; color:#4A7BD6; font-weight:600;\">{html.escape(label)}</td>"
-        f"<td style=\"padding:2px 0;\">{value}</td>"
-        "</tr>"
-    )
+def _diag_line(label: str, value: str) -> str:
+    return f"  • {label:<18}: {value}"
 
 
 def format_diagnostics_snapshot_html(
@@ -120,7 +110,7 @@ def format_diagnostics_snapshot_html(
     local_tz: tzinfo,
     local_tz_name: str,
 ) -> str:
-    """Render persisted diagnostics into a compact HTML summary."""
+    """Render persisted diagnostics into the same compact visual language as statistics."""
     last_refresh = _format_utc_string(
         snapshot.last_refresh_utc, local_tz=local_tz, local_tz_name=local_tz_name
     )
@@ -131,76 +121,71 @@ def format_diagnostics_snapshot_html(
         snapshot.last_failure_refresh_utc, local_tz=local_tz, local_tz_name=local_tz_name
     )
 
-    error_text = "—"
     if snapshot.last_error_kind or snapshot.last_error_message:
-        error_text = html.escape(snapshot.last_error_kind or "Error")
+        error_text = snapshot.last_error_kind or "Error"
         if snapshot.last_error_message:
-            error_text = f"{error_text}: {html.escape(snapshot.last_error_message)}"
+            error_text = f"{error_text}: {snapshot.last_error_message}"
+    else:
+        error_text = "—"
 
-    sections: list[str] = []
-    sections.append(
-        "<h3 style=\"color:#4A7BD6; margin-bottom:6px;\">🩺 Refresh health</h3>"
-        "<table style=\"margin-bottom:12px;\">"
-        + _row_html("Current status", _status_chip(snapshot.last_status))
-        + _row_html("Last refresh", html.escape(last_refresh))
-        + _row_html("Last successful refresh", html.escape(last_success))
-        + _row_html("Last failed refresh", html.escape(last_failure))
-        + "</table>"
-    )
-    sections.append(
-        "<h3 style=\"color:#D7BA7D; margin-bottom:6px;\">🌐 Last network activity</h3>"
-        "<table style=\"margin-bottom:12px;\">"
-        + _row_html("Identity", html.escape(snapshot.last_identity_used or "—"))
-        + _row_html(
-            "Bytes received",
-            html.escape(str(snapshot.last_scrape_raw_bytes)) if snapshot.last_scrape_raw_bytes is not None else "—",
-        )
-        + _row_html("Codes parsed", html.escape(str(snapshot.last_scraped_codes_count)))
-        + "</table>"
-    )
-    sections.append(
-        "<h3 style=\"color:#C75C5C; margin-bottom:6px;\">❗ Last error</h3>"
-        f"<div style=\"margin-bottom:12px;\">{error_text}</div>"
-    )
-
-    runs_html: list[str] = []
+    lines: list[str] = []
+    lines.append("== File Centipede helper – Diagnostics ==")
+    lines.append("")
+    lines.append("🩺 Refresh health")
+    lines.append(_diag_line("Current status", _status_label(snapshot.last_status)))
+    lines.append(_diag_line("Last refresh", last_refresh))
+    lines.append(_diag_line("Last success", last_success))
+    lines.append(_diag_line("Last failure", last_failure))
+    lines.append("")
+    lines.append("🌐 Last network activity")
+    lines.append(_diag_line("Identity", snapshot.last_identity_used or "—"))
+    lines.append(_diag_line("Bytes received", str(snapshot.last_scrape_raw_bytes) if snapshot.last_scrape_raw_bytes is not None else "—"))
+    lines.append(_diag_line("Codes parsed", str(snapshot.last_scraped_codes_count)))
+    lines.append("")
+    lines.append("❗ Last error")
+    lines.append(f"  • {error_text}")
+    lines.append("")
+    lines.append("🕓 Recent refresh runs")
     if not snapshot.recent_fetch_runs:
-        runs_html.append("<li>none recorded</li>")
+        lines.append("  (no refresh runs recorded yet)")
     else:
         for run in snapshot.recent_fetch_runs:
             finished_local = run.finished_utc.astimezone(local_tz).strftime(
                 f"%Y-%m-%d %I:%M:%S %p ({local_tz_name})"
             )
-            run_status = "success" if run.success else "failure"
-            run_chip = _status_chip(run_status)
-            detail_bits = [
-                f"identity: {html.escape(run.identity_label or '—')}",
-                f"bytes: {run.raw_bytes if run.raw_bytes is not None else '—'}",
-                f"codes: {run.code_count if run.code_count is not None else '—'}",
+            bits = [
+                f"identity={run.identity_label or '—'}",
+                f"bytes={run.raw_bytes if run.raw_bytes is not None else '—'}",
+                f"codes={run.code_count if run.code_count is not None else '—'}",
             ]
             if run.http_status is not None:
-                detail_bits.append(f"http: {run.http_status}")
+                bits.append(f"http={run.http_status}")
             if run.error_kind or run.error_message:
-                err = html.escape(run.error_kind or "Error")
+                err = run.error_kind or "Error"
                 if run.error_message:
-                    err = f"{err}: {html.escape(run.error_message)}"
-                detail_bits.append(f"error: {err}")
-            runs_html.append(
-                "<li style=\"margin-bottom:8px;\">"
-                f"<div><strong>{html.escape(finished_local)}</strong> — {run_chip}</div>"
-                f"<div style=\"margin-top:2px; color:#666;\">{' • '.join(detail_bits)}</div>"
-                "</li>"
-            )
+                    err = f"{err}: {run.error_message}"
+                bits.append(f"error={err}")
+            lines.append(f"  • {finished_local} — {_status_label('success' if run.success else 'failure')}")
+            lines.append(f"    {' • '.join(bits)}")
 
-    sections.append(
-        "<h3 style=\"color:#6A5ACD; margin-bottom:6px;\">🕓 Recent refresh runs</h3>"
-        "<ul style=\"padding-left:18px; margin-top:0;\">"
-        + "".join(runs_html)
-        + "</ul>"
-    )
+    import html as _html
+    def colorize(line: str) -> str:
+        if line.startswith("== "):
+            return "<span style='color:#4A7BD6;'>" f"{_html.escape(line)}" "</span>"
+        if line in (
+            "🩺 Refresh health",
+            "🌐 Last network activity",
+            "❗ Last error",
+            "🕓 Recent refresh runs",
+        ):
+            return "<span style='color:#D7BA7D;'>" f"{_html.escape(line)}" "</span>"
+        return _html.escape(line)
 
+    body = "\n".join(colorize(l) for l in lines)
     return (
-        "<html><body style=\"font-family: sans-serif; font-size: 10pt;\">"
-        + "".join(sections)
-        + "</body></html>"
+        "<html><body>"
+        "<pre style='font-family: monospace; font-size: 9pt;'>"
+        f"{body}"
+        "</pre>"
+        "</body></html>"
     )

@@ -151,7 +151,7 @@ class SettingsDialog(QDialog):
         main_layout.addWidget(buttons)
 
         self.setLayout(main_layout)
-        self.resize(560, 520)
+        self.resize(460, 710)
 
     def _update_timezone_label(self) -> None:
         tz_name = get_local_zone_name(DEFAULT_TIMEZONE)

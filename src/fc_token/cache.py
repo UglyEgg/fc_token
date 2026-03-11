@@ -20,6 +20,7 @@ from .core.storage import (
     FetchRunRecord,
     SQLiteTokenStore,
     StatisticsSnapshot,
+    DEFAULT_MAX_EXPIRED_TOKENS,
 )
 from .models import CodeEntry, UTC
 
@@ -31,6 +32,7 @@ class CodeCache:
     app_name: str = "fc_token"
     tz: tzinfo = UTC
     max_fetch_runs: int = 100
+    max_expired_tokens: int = DEFAULT_MAX_EXPIRED_TOKENS
     cache_dir: Path | None = field(init=False, default=None)
     cache_path: Path | None = field(init=False, default=None)
     legacy_cache_path: Path | None = field(init=False, default=None)
@@ -129,11 +131,17 @@ class CodeCache:
         }
         for entry in fresh_codes:
             merged[entry.start_str] = entry
-        active = [entry for entry in merged.values() if entry.end >= now]
-        active.sort(key=lambda entry: entry.start)
-        self.save(active)
+
+        active_or_future = [entry for entry in merged.values() if entry.end >= now]
+        expired = [entry for entry in merged.values() if entry.end < now]
+        expired.sort(key=lambda entry: (entry.end, entry.start, entry.code), reverse=True)
+        retained_expired = expired[: max(0, int(self.max_expired_tokens))]
+
+        retained = active_or_future + retained_expired
+        retained.sort(key=lambda entry: entry.start)
+        self.save(retained)
         self._persist_refresh_metadata(fetched_at_utc=now, success=True)
-        return active
+        return retained
 
     def purge(self) -> None:
         self._codes = []
@@ -188,6 +196,7 @@ class CodeCache:
 
     def apply_retention(self) -> None:
         self._store.enforce_retention(max_fetch_runs=self.max_fetch_runs)
+        # Expired-token retention is enforced when codes are merged and saved.
 
     def _now(self) -> datetime:
         return datetime.now(self.tz)

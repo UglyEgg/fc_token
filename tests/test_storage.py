@@ -11,6 +11,7 @@ from fc_token.core.storage import (
     FetchRunRecord,
     SQLiteTokenStore,
     StatisticsSnapshot,
+    DEFAULT_MAX_EXPIRED_TOKENS,
 )
 from fc_token.models import CodeEntry, UTC
 
@@ -180,6 +181,10 @@ class SQLiteTokenStoreTests(unittest.TestCase):
         self.assertEqual(snapshot.average_duration_ms, 2000)
         self.assertEqual(snapshot.total_foreground_seconds, 120)
         self.assertEqual(snapshot.identity_counts, (("Agent-A", 1),))
+
+    def test_default_max_expired_tokens_constant_is_150(self) -> None:
+        self.assertEqual(DEFAULT_MAX_EXPIRED_TOKENS, 150)
+
 
 if __name__ == "__main__":
     unittest.main()

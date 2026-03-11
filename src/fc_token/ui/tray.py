@@ -43,6 +43,7 @@ from fc_token.ui.devtools import (
 from fc_token.ui.dialogs.about import show_about_dialog
 from fc_token.ui.dialogs.timezone import run_timezone_dialog
 from fc_token.ui.dialogs.settings import run_settings_dialog
+from fc_token.ui.dialogs.sqlite_explorer import show_sqlite_explorer_dialog
 from fc_token.core.refresh import RefreshOutcome, RefreshService, RefreshState, RefreshStateKind, RefreshTrigger
 from fc_token.timezone_utils import resolve_local_timezone
 from fc_token.ui.workers import RefreshWorker
@@ -58,9 +59,6 @@ AUTO_REFRESH_MINUTES = 24 * 60
 # Resource filenames packaged under fc_token/resources
 ICON_PNG_NAME = "fc_token.png"
 ICON_SYMBOLIC_NAME = "fc_token_symbolic.svg"
-
-DEV_MODE_KEY = "developer/dev_mode_enabled"
-
 
 class TrayController:
     """System tray integration, scheduling, notifications, and dev tooling."""
@@ -81,7 +79,7 @@ class TrayController:
         # Track this session's start (foreground uptime)
         self.session_started_utc: datetime = datetime.now(timezone.utc)
 
-        self.dev_mode_enabled: bool = self._detect_dev_mode()
+        self.dev_mode_enabled: bool = False
 
         # Icon mode: "auto", "light", "dark"
         self.icon_mode: str = self.settings.value(KEY_ICON_MODE, "auto", type=str)
@@ -165,19 +163,14 @@ class TrayController:
         self.tray_icon.show()
 
     # ------------------------------------------------------------------ #
-    # Developer mode "lock"
+    # Developer mode (session only)
     # ------------------------------------------------------------------ #
 
-    def _detect_dev_mode(self) -> bool:
-        """Return True if the developer menu should be enabled."""
-        return self.settings.value(DEV_MODE_KEY, False, type=bool)
-
     def enable_dev_mode(self) -> bool:
-        """Persist developer-mode enablement and rebuild the tray menu."""
+        """Enable developer-mode for the current session and rebuild the tray menu."""
         if self.dev_mode_enabled:
             return False
         self.dev_mode_enabled = True
-        self.settings.setValue(DEV_MODE_KEY, True)
         self._setup_menu()
         return True
 
@@ -287,9 +280,9 @@ class TrayController:
             self.dev_open_cache.triggered.connect(self.dev_tools.open_cache_folder)
             inspect_menu.addAction(self.dev_open_cache)
 
-            self.dev_view_cache_json = QAction("Inspect persisted cache…", inspect_menu)
-            self.dev_view_cache_json.triggered.connect(self.dev_tools.show_cache_json)
-            inspect_menu.addAction(self.dev_view_cache_json)
+            self.dev_view_sqlite = QAction("Inspect SQLite db…", inspect_menu)
+            self.dev_view_sqlite.triggered.connect(self.open_sqlite_explorer)
+            inspect_menu.addAction(self.dev_view_sqlite)
 
             simulation_menu = self.dev_menu.addMenu("Simulation")
             self.dev_simulate_time = QAction("Simulate time…", simulation_menu)
@@ -347,6 +340,10 @@ class TrayController:
         tray_menu.addAction(self.action_quit)
 
         self.tray_icon.setContextMenu(tray_menu)
+
+    def open_sqlite_explorer(self) -> None:
+        """Open the read-only SQLite explorer dialog."""
+        show_sqlite_explorer_dialog(self.window, self.cache.cache_path)
 
     def open_settings(self) -> None:
         """Open the unified Settings dialog."""

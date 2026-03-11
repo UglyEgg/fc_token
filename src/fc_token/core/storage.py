@@ -15,6 +15,7 @@ from fc_token.models import CodeEntry, UTC
 _DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
 _INSTALL_UTC_KEY = "lifecycle/install_utc"
 _TOTAL_FOREGROUND_SECONDS_KEY = "lifecycle/total_foreground_seconds"
+DEFAULT_MAX_EXPIRED_TOKENS = 150
 
 
 @dataclass(frozen=True, slots=True)
