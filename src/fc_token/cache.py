@@ -8,7 +8,6 @@ UI moves to the new core service layer.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from pathlib import Path
@@ -16,19 +15,22 @@ from typing import List, Sequence
 
 from PyQt6.QtCore import QStandardPaths
 
+from .core.storage import FetchRunRecord, SQLiteTokenStore
 from .models import CodeEntry, UTC
 
 
 @dataclass(slots=True)
 class CodeCache:
-    """Manage on-disk cache of activation codes with expiration filtering."""
+    """Manage persisted activation codes with expiration filtering."""
 
     app_name: str = "fc_token"
     tz: tzinfo = UTC
     cache_dir: Path | None = field(init=False, default=None)
     cache_path: Path | None = field(init=False, default=None)
+    legacy_cache_path: Path | None = field(init=False, default=None)
     _codes: List[CodeEntry] = field(init=False, default_factory=list)
     _loaded: bool = field(init=False, default=False)
+    _store: SQLiteTokenStore = field(init=False)
     last_identity_used: str | None = field(init=False, default=None)
     last_scrape_raw_bytes: int | None = field(init=False, default=None)
     last_scraped_codes_count: int = field(init=False, default=0)
@@ -38,40 +40,68 @@ class CodeCache:
         base_path = Path(cache_root) if cache_root else Path.home() / ".cache"
         self.cache_dir = base_path / self.app_name
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_path = self.cache_dir / "file_centipede_codes.json"
+        self.cache_path = self.cache_dir / "file_centipede_codes.sqlite3"
+        self.legacy_cache_path = self.cache_dir / "file_centipede_codes.json"
+        self._store = SQLiteTokenStore(
+            self.cache_path,
+            tz=self.tz,
+            legacy_json_path=self.legacy_cache_path,
+        )
+        self._hydrate_metadata_from_store()
 
     def _get_cache_root(self) -> str:
         return QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.CacheLocation
         )
 
-    def _load_from_disk(self) -> list[CodeEntry]:
-        if self.cache_path is None or not self.cache_path.exists():
-            return []
-
+    def _hydrate_metadata_from_store(self) -> None:
+        self.last_identity_used = self._store.get_app_state("last_identity_used")
+        raw_bytes = self._store.get_app_state("last_scrape_raw_bytes")
+        codes_count = self._store.get_app_state("last_scraped_codes_count")
         try:
-            raw = json.loads(self.cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            return []
+            self.last_scrape_raw_bytes = None if raw_bytes is None else int(raw_bytes)
+        except (TypeError, ValueError):
+            self.last_scrape_raw_bytes = None
+        try:
+            self.last_scraped_codes_count = (
+                0 if codes_count is None else int(codes_count)
+            )
+        except (TypeError, ValueError):
+            self.last_scraped_codes_count = 0
 
-        codes: list[CodeEntry] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            try:
-                codes.append(CodeEntry.from_dict(item, tz=self.tz))
-            except Exception:
-                continue
-        return codes
+    def _load_from_disk(self) -> list[CodeEntry]:
+        return self._store.load_codes()
 
     def _save_to_disk(self, codes: list[CodeEntry]) -> None:
-        if self.cache_path is None:
-            return
-        data = [entry.to_dict() for entry in codes]
-        try:
-            self.cache_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        self._store.save_codes(codes)
+
+    def _persist_refresh_metadata(
+        self, *, fetched_at_utc: datetime, success: bool = True
+    ) -> None:
+        self._store.set_app_state("last_identity_used", self.last_identity_used or "")
+        self._store.set_app_state(
+            "last_scrape_raw_bytes",
+            ""
+            if self.last_scrape_raw_bytes is None
+            else str(self.last_scrape_raw_bytes),
+        )
+        self._store.set_app_state(
+            "last_scraped_codes_count", str(self.last_scraped_codes_count)
+        )
+        self._store.set_app_state(
+            "last_refresh_utc",
+            fetched_at_utc.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        self._store.record_fetch_run(
+            FetchRunRecord(
+                started_utc=fetched_at_utc,
+                finished_utc=fetched_at_utc,
+                success=success,
+                identity_label=self.last_identity_used,
+                raw_bytes=self.last_scrape_raw_bytes,
+                code_count=self.last_scraped_codes_count,
+            )
+        )
 
     def get_codes(self) -> list[CodeEntry]:
         if not self._loaded:
@@ -99,22 +129,21 @@ class CodeCache:
         now: datetime | None = None,
     ) -> list[CodeEntry]:
         now = now or self._now()
-        merged: dict[str, CodeEntry] = {entry.start_str: entry for entry in self.get_codes()}
+        merged: dict[str, CodeEntry] = {
+            entry.start_str: entry for entry in self.get_codes()
+        }
         for entry in fresh_codes:
             merged[entry.start_str] = entry
         active = [entry for entry in merged.values() if entry.end >= now]
         active.sort(key=lambda entry: entry.start)
         self.save(active)
+        self._persist_refresh_metadata(fetched_at_utc=now, success=True)
         return active
 
     def purge(self) -> None:
         self._codes = []
         self._loaded = True
-        try:
-            if self.cache_path is not None and self.cache_path.exists():
-                self.cache_path.unlink()
-        except Exception:
-            pass
+        self._store.purge()
 
     def refresh(self, url: str, *, use_network: bool = True) -> list[CodeEntry]:
         """Legacy compatibility wrapper.
