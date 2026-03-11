@@ -44,8 +44,7 @@ from fc_token.ui.devtools import (
 from fc_token.ui.dialogs.about import show_about_dialog
 from fc_token.ui.dialogs.timezone import run_timezone_dialog
 from fc_token.ui.dialogs.settings import run_settings_dialog
-from fc_token.core.refresh import RefreshOutcome, RefreshService, RefreshState, RefreshStateKind, RefreshTrigger
-from fc_token.timezone_utils import resolve_local_timezone
+from fc_token.ui.utils import get_local_zone_name, get_local_zone
 from fc_token.ui.workers import RefreshWorker
 from fc_token.scraper import refresh_source_timezone
 
@@ -68,10 +67,9 @@ DEV_UNLOCK_HASH = "327acaa5006c55b3c7a0100cf75df7d1a3232ecc08e1c9cbb63da3619543b
 class TrayController:
     """System tray integration, scheduling, notifications, and dev tooling."""
 
-    def __init__(self, window, cache: CodeCache, refresh_service: RefreshService) -> None:
+    def __init__(self, window, cache: CodeCache) -> None:
         self.window = window
         self.cache = cache
-        self.refresh_service = refresh_service
 
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
 
@@ -152,7 +150,6 @@ class TrayController:
         self.tray_icon.activated.connect(self.on_tray_activated)
 
         # Background-refresh state
-        self.refresh_state: RefreshState = self.refresh_service.state_machine.current
         self._refresh_thread: QThread | None = None
         self._refresh_worker: RefreshWorker | None = None
         self._refresh_in_progress: bool = False
@@ -192,19 +189,20 @@ class TrayController:
     # ------------------------------------------------------------------ #
 
     def initial_load(self, *, use_network: bool | None = None) -> None:
-        """Perform the initial cache refresh and UI update."""
+        """Perform the initial cache refresh and UI update.
+
+        Respects offline-first rules and minimum scrape interval.
+        """
         if use_network is None:
-            use_network = self._get_refresh_decision().should_use_network
+            use_network = self._should_refresh_with_network()
 
         if use_network:
-            self._start_refresh_task(initial=True, trigger=RefreshTrigger.INITIAL)
-            return
-
-        outcome = self.refresh_service.load_cache_outcome(
-            trigger=RefreshTrigger.INITIAL,
-            last_refresh_utc=self.last_refresh_utc,
-        )
-        self._apply_refresh_outcome(outcome, initial=True)
+            self._start_refresh_task(initial=True, use_network=True)
+        else:
+            changed = self.window.refresh_from_cache(initial=True)
+            if changed:
+                self._on_code_changed()
+            self.update_refresh_ui()
 
     # ------------------------------------------------------------------ #
     # Tray icon, menu, and theme
@@ -254,9 +252,6 @@ class TrayController:
         self.status_menu.addAction(self.status_title)
 
         self.status_menu.addSeparator()
-
-        self.status_state = QAction("", self.status_menu)
-        self.status_menu.addAction(self.status_state)
 
         self.status_schedule = QAction("", self.status_menu)
         self.status_menu.addAction(self.status_schedule)
@@ -507,31 +502,54 @@ class TrayController:
         minutes = max(1, seconds // 60)
         return self._format_interval_minutes(minutes)
 
-    def _update_last_refresh(self, value: datetime | None = None) -> None:
+    def _update_last_refresh(self) -> None:
         """Record the timestamp of the last successful online refresh."""
-        now_utc = value or datetime.now(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
         self.last_refresh_utc = now_utc
         self.settings.setValue("last_refresh_utc", now_utc.isoformat())
-
-    def _get_refresh_decision(self):
-        return self.refresh_service.decide_network_use(
-            last_refresh_utc=self.last_refresh_utc,
-        )
 
     def get_next_allowed_refresh_info(
         self,
     ) -> tuple[Optional[datetime], Optional[int]]:
         """Return (next_allowed_utc, remaining_seconds) for an online refresh."""
-        decision = self._get_refresh_decision()
-        next_allowed = decision.next_allowed_utc
-        if next_allowed is None:
+        if self.last_refresh_utc is None:
             return None, None
 
         now_utc = datetime.now(timezone.utc)
+        base = self.last_refresh_utc
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+
+        next_allowed = base + timedelta(minutes=MIN_REFRESH_MINUTES)
         remaining_sec = int((next_allowed - now_utc).total_seconds())
         if remaining_sec <= 0:
             return None, 0
         return next_allowed, remaining_sec
+
+    def _should_refresh_with_network(self) -> bool:
+        """Decide whether to hit the remote site or stay offline."""
+        now_utc = datetime.now(timezone.utc)
+        codes = self.cache.get_codes()
+
+        # First-ever run: no last_refresh_utc recorded → allow one scrape.
+        if self.last_refresh_utc is None:
+            return True
+
+        # If we still have any future codes, stay offline.
+        if any(c.end >= now_utc for c in codes):
+            return False
+
+        # No active future codes. Enforce the 6-hour floor.
+        base = self.last_refresh_utc
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+
+        elapsed_min = (now_utc - base).total_seconds() / 60.0
+        if elapsed_min < MIN_REFRESH_MINUTES:
+            return False
+
+        # Floor passed, and no active codes → allowed.
+        return True
 
     def update_timer(self) -> None:
         """Reconfigure timers based on current settings."""
@@ -554,16 +572,19 @@ class TrayController:
         self.update_refresh_ui()
 
     def _on_refresh_timer(self) -> None:
-        decision = self._get_refresh_decision()
-        if decision.should_use_network:
-            self._start_refresh_task(initial=False, trigger=RefreshTrigger.AUTO)
-            return
-
-        outcome = self.refresh_service.load_cache_outcome(
-            trigger=RefreshTrigger.AUTO,
-            last_refresh_utc=self.last_refresh_utc,
-        )
-        self._apply_refresh_outcome(outcome, initial=False)
+        use_network = self._should_refresh_with_network()
+        if use_network:
+            self._start_refresh_task(initial=False, use_network=True)
+        else:
+            changed = self.window.refresh_from_cache(initial=False)
+            if changed:
+                self._on_code_changed()
+            if self.auto_refresh_enabled:
+                now_utc = datetime.now(timezone.utc)
+                self.next_refresh_deadline = now_utc + timedelta(
+                    minutes=AUTO_REFRESH_MINUTES
+                )
+            self.update_refresh_ui()
 
     def _show_refresh_delay_info(self) -> None:
         """Show an info box explaining when an online refresh is allowed (floor)."""
@@ -618,24 +639,41 @@ class TrayController:
     def _refresh_now(self) -> None:
         """Manual refresh from tray, respecting normal rules."""
         now_utc = datetime.now(timezone.utc)
-        active_codes = self.cache.get_active_codes(now=now_utc)
-        decision = self._get_refresh_decision()
+        codes = self.cache.get_codes()
+        active_codes = [c for c in codes if c.end >= now_utc]
+        has_active = bool(active_codes)
 
-        if not decision.should_use_network:
-            if active_codes:
-                last_end = max(code.end for code in active_codes)
+        # Floor state (only relevant when there are no active codes)
+        floor_block = False
+        if self.last_refresh_utc is not None:
+            base = self.last_refresh_utc
+            if base.tzinfo is None:
+                base = base.replace(tzinfo=timezone.utc)
+            floor_block = (now_utc - base) < timedelta(minutes=MIN_REFRESH_MINUTES)
+
+        use_network = self._should_refresh_with_network()
+
+        if not use_network:
+            if has_active:
+                # Blocked because we already have future codes.
+                last_end = max(c.end for c in active_codes)
                 self._show_active_codes_block_info(last_end)
+            elif floor_block:
+                # No active codes, but blocked by the 6-hour floor.
+                self._show_refresh_delay_info()
             else:
+                # Fallback (should be rare)
                 self._show_refresh_delay_info()
 
-            outcome = self.refresh_service.load_cache_outcome(
-                trigger=RefreshTrigger.MANUAL,
-                last_refresh_utc=self.last_refresh_utc,
-            )
-            self._apply_refresh_outcome(outcome, initial=False)
+            # Even when network refresh is blocked, update UI from cache.
+            changed = self.window.refresh_from_cache(initial=False)
+            if changed:
+                self._on_code_changed()
+            self.update_refresh_ui()
             return
 
-        self._start_refresh_task(initial=False, trigger=RefreshTrigger.MANUAL)
+        # Network refresh is allowed → run via background worker.
+        self._start_refresh_task(initial=False, use_network=True)
 
     def _force_online_refresh(self) -> None:
         """Developer: force an online refresh ignoring cache/floor rules."""
@@ -660,11 +698,7 @@ class TrayController:
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self._start_refresh_task(
-            initial=False,
-            trigger=RefreshTrigger.FORCED,
-            force_network=True,
-        )
+        self._start_refresh_task(initial=False, use_network=True)
 
     def _on_code_changed(self) -> None:
         self.unseen_change = True
@@ -740,12 +774,7 @@ class TrayController:
                 next_run_str = "n/a"
 
         # --- Common label width for tooltip alignment ---
-        state_value = self.refresh_state.kind.value.replace("_", " ").title()
-        if self.refresh_state.detail:
-            state_value = f"{state_value} — {self.refresh_state.detail}"
-
         labels = {
-            "state": "State",
             "schedule": "Schedule",
             "last": "Last",
             "next": "Next",
@@ -761,7 +790,6 @@ class TrayController:
         )
 
         # Tooltip-style lines (with indent + aligned labels)
-        state_line = f"  🧭 {labels['state'].ljust(label_width)} : {state_value}"
         schedule_line = (
             f"  📅 {labels['schedule'].ljust(label_width)} : {schedule_value}"
         )
@@ -772,7 +800,6 @@ class TrayController:
         next_run_line = f"  🔄 {labels['next_run'].ljust(label_width)} : {next_run_str}"
 
         # Menu-style lines (no indent, simpler)
-        state_menu = f"🧭 State: {state_value}"
         schedule_menu = f"📅 Schedule: {schedule_value}"
         last_menu = f"⏲️ Last: {last_age_str}"
         next_menu = f"⏭️ Next: {next_short_relative}"
@@ -783,7 +810,6 @@ class TrayController:
         # --- Update Status submenu ---
         if self.show_menu_info:
             self.status_menu_action.setVisible(True)
-            self.status_state.setText(state_menu)
             self.status_schedule.setText(schedule_menu)
             self.status_last.setText(last_menu)
             self.status_next.setText(next_menu)
@@ -798,7 +824,6 @@ class TrayController:
             APP_NAME,
             "",
             "[ ⏱ Refresh ]",
-            state_line,
             schedule_line,
             last_line,
             next_line,
@@ -995,9 +1020,8 @@ class TrayController:
         self.update_refresh_ui()
 
     def _refresh_timezone_cache(self) -> None:
-        resolved_tz = resolve_local_timezone(DEFAULT_TIMEZONE)
-        self._tz_name_cache = resolved_tz.display_name
-        self._tzinfo_cache = resolved_tz.tzinfo
+        self._tz_name_cache = get_local_zone_name(DEFAULT_TIMEZONE)
+        self._tzinfo_cache = get_local_zone(DEFAULT_TIMEZONE)
 
     def _get_local_zone_name(self) -> str:
         return self._tz_name_cache
@@ -1009,46 +1033,24 @@ class TrayController:
     # Background refresh helpers
     # ------------------------------------------------------------------ #
 
-    def _start_refresh_task(
-        self,
-        *,
-        initial: bool,
-        trigger: RefreshTrigger,
-        force_network: bool = False,
-    ) -> None:
+    def _start_refresh_task(self, *, initial: bool, use_network: bool) -> None:
         """Start a background refresh if one is not already running."""
         if self._refresh_in_progress:
             return
 
-        decision = self.refresh_service.decide_network_use(
-            last_refresh_utc=self.last_refresh_utc,
-            force_network=force_network,
-        )
-        use_network = decision.should_use_network
-
         self._refresh_in_progress = True
         self._current_refresh_initial = initial
         self._current_refresh_use_network = use_network
-        self.refresh_state = self.refresh_service.state_machine.start(
-            use_network=use_network,
-            trigger=trigger,
-        )
-        self._current_refresh_started_at_utc = (
-            datetime.now(timezone.utc) if use_network else None
-        )
+        # Record start time for network scrapes (for duration stats / egg)
+        if use_network:
+            self._current_refresh_started_at_utc = datetime.now(timezone.utc)
+        else:
+            self._current_refresh_started_at_utc = None
 
         self.action_refresh.setEnabled(False)
-        self.update_refresh_ui()
 
         thread = QThread(self.window)
-        worker = RefreshWorker(
-            self.refresh_service,
-            self.window.url,
-            trigger=trigger,
-            last_refresh_utc=self.last_refresh_utc,
-            force_network=force_network,
-            initial=initial,
-        )
+        worker = RefreshWorker(self.cache, self.window.url, use_network=use_network)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
@@ -1062,25 +1064,28 @@ class TrayController:
 
         thread.start()
 
-    def _apply_refresh_outcome(self, outcome: RefreshOutcome, *, initial: bool) -> None:
-        self.refresh_state = outcome.state
-        changed = self.window.refresh_from_codes(outcome.codes, initial=initial)
+    def _on_refresh_success(self, codes: list) -> None:
+        """Handle successful completion of a background refresh."""
+        changed = self.window.refresh_from_codes(
+            codes,
+            initial=self._current_refresh_initial,
+        )
 
         duration_sec: float | None = None
-        if outcome.state.used_network and self._current_refresh_started_at_utc:
+        if self._current_refresh_use_network and self._current_refresh_started_at_utc:
             now_utc = datetime.now(timezone.utc)
             delta = now_utc - self._current_refresh_started_at_utc
             duration_sec = max(0.0, delta.total_seconds())
 
-        if outcome.fetched_at_utc is not None:
-            self._update_last_refresh(outcome.fetched_at_utc)
+        if self._current_refresh_use_network:
+            self._update_last_refresh()
+            # Record scrape stats (for dev menu + egg compact stats)
+            # Always record for all users; DevTools handles nag dev-mode guard.
             try:
-                self.dev_tools.record_scrape_stats(
-                    outcome.codes,
-                    duration_seconds=duration_sec,
-                )
+                self.dev_tools.record_scrape_stats(codes, duration_seconds=duration_sec)
             except TypeError:
-                self.dev_tools.record_scrape_stats(outcome.codes)  # type: ignore[arg-type]
+                # Backwards compatibility in case dev_tools has old signature
+                self.dev_tools.record_scrape_stats(codes)  # type: ignore[arg-type]
 
         if self.auto_refresh_enabled:
             now_utc = datetime.now(timezone.utc)
@@ -1093,32 +1098,9 @@ class TrayController:
 
         self.update_refresh_ui()
 
-        if outcome.state.last_error:
-            title = (
-                "Refresh failed"
-                if outcome.state.kind in {RefreshStateKind.NETWORK_FAILED, RefreshStateKind.PARSE_FAILED}
-                else "Using cached activation codes"
-            )
-            self.tray_icon.showMessage(
-                title,
-                outcome.state.last_error,
-                QSystemTrayIcon.MessageIcon.Warning,
-                5000,
-            )
-
-    def _on_refresh_success(self, outcome: RefreshOutcome) -> None:
-        """Handle successful completion of a background refresh."""
-        self._apply_refresh_outcome(outcome, initial=self._current_refresh_initial)
-
     def _on_refresh_error(self, message: str) -> None:
-        """Handle an unexpected worker failure."""
-        self.refresh_state = RefreshState(
-            kind=RefreshStateKind.NETWORK_FAILED,
-            detail="Background refresh worker failed unexpectedly.",
-            used_network=self._current_refresh_use_network,
-            last_error=message,
-            last_refresh_utc=self.last_refresh_utc,
-        )
+        """Handle a refresh failure (network or parsing)."""
+        # Keep using whatever is already cached; just refresh UI from cache.
         self.window.refresh_from_cache(initial=self._current_refresh_initial)
         self.update_refresh_ui()
 

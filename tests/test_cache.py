@@ -20,10 +20,12 @@ except ImportError:
 
 if PY311_PLUS and PYQT_AVAILABLE:
     from fc_token.cache import CodeCache
+    from fc_token.core.source import SourceFetchResult
     from fc_token.models import CodeEntry, UTC
 else:
     CodeCache = None
     CodeEntry = None
+    SourceFetchResult = None
     UTC = timezone.utc
 
 
@@ -35,7 +37,6 @@ class CodeCacheTests(unittest.TestCase):
     """Coverage for cache refresh behavior and persistence."""
 
     def test_refresh_merges_and_filters_expired(self) -> None:
-        """refresh merges remote data and removes expired entries."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch(
                 "fc_token.cache.QStandardPaths.writableLocation",
@@ -61,9 +62,17 @@ class CodeCacheTests(unittest.TestCase):
 
             cache.save([expired, active])
 
+            result = SourceFetchResult(
+                codes=[fresh],
+                identity_label="TestAgent",
+                raw_bytes=1234,
+                fetched_at_utc=datetime(2099, 1, 1, 12, 0, 0, tzinfo=UTC),
+                url="http://example.com",
+                raw_text="irrelevant",
+            )
             with patch(
-                "fc_token.cache.fetch_codes_with_identity",
-                return_value=([fresh], "TestAgent", 1234),
+                "fc_token.core.source.ActivationSourceClient.fetch_codes",
+                return_value=result,
             ):
                 refreshed = cache.refresh("http://example.com", use_network=True)
 

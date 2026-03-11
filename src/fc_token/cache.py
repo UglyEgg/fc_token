@@ -1,9 +1,9 @@
 """On-disk cache management for activation codes.
 
-Refactored to:
-- Maintain a small in-memory cache to avoid repeated JSON loads.
-- Centralise expiration filtering in `refresh()`.
-- Provide a simple, read-only view via `get_codes()`.
+The cache is now primarily a storage abstraction. Refresh orchestration lives in
+``fc_token.core.refresh`` and network access lives in ``fc_token.core.source``.
+A legacy ``refresh()`` method is retained for backwards compatibility while the
+UI moves to the new core service layer.
 """
 
 from __future__ import annotations
@@ -12,23 +12,16 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from pathlib import Path
-from typing import List
+from typing import List, Sequence
 
 from PyQt6.QtCore import QStandardPaths
 
 from .models import CodeEntry, UTC
-from .scraper import fetch_codes_with_identity
 
 
 @dataclass(slots=True)
 class CodeCache:
-    """Manage on-disk cache of activation codes with expiration filtering.
-
-    All timestamps are stored and compared in UTC.
-
-    This implementation keeps a small in-memory copy of the cache to avoid
-    repeated JSON parsing during normal operation.
-    """
+    """Manage on-disk cache of activation codes with expiration filtering."""
 
     app_name: str = "fc_token"
     tz: tzinfo = UTC
@@ -36,39 +29,23 @@ class CodeCache:
     cache_path: Path | None = field(init=False, default=None)
     _codes: List[CodeEntry] = field(init=False, default_factory=list)
     _loaded: bool = field(init=False, default=False)
-    # Metadata about the most recent network scrape (for stats/dev tools)
     last_identity_used: str | None = field(init=False, default=None)
     last_scrape_raw_bytes: int | None = field(init=False, default=None)
     last_scraped_codes_count: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         cache_root = self._get_cache_root()
-        if cache_root:
-            base_path = Path(cache_root)
-        else:
-            # Fallback for environments where QStandardPaths returns an empty string.
-            base_path = Path.home() / ".cache"
-
+        base_path = Path(cache_root) if cache_root else Path.home() / ".cache"
         self.cache_dir = base_path / self.app_name
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-
         self.cache_path = self.cache_dir / "file_centipede_codes.json"
 
     def _get_cache_root(self) -> str:
-        """Return the base cache directory path from QStandardPaths."""
         return QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.CacheLocation
         )
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
-
     def _load_from_disk(self) -> list[CodeEntry]:
-        """Low-level loader that reads and parses the JSON cache file.
-
-        Malformed entries are ignored.
-        """
         if self.cache_path is None or not self.cache_path.exists():
             return []
 
@@ -84,106 +61,78 @@ class CodeCache:
             try:
                 codes.append(CodeEntry.from_dict(item, tz=self.tz))
             except Exception:
-                # Ignore malformed entries, keep the rest.
                 continue
-
         return codes
 
     def _save_to_disk(self, codes: list[CodeEntry]) -> None:
         if self.cache_path is None:
             return
-        data = [c.to_dict() for c in codes]
+        data = [entry.to_dict() for entry in codes]
         try:
             self.cache_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:
-            # Best-effort persistence; ignore IO errors.
             pass
 
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
-
     def get_codes(self) -> list[CodeEntry]:
-        """Return all cached codes (including possibly expired ones).
-
-        Results are backed by an internal in-memory list. Callers must not
-        mutate the returned list in-place.
-        """
         if not self._loaded:
             self._codes = self._load_from_disk()
             self._loaded = True
-        # Return a shallow copy to avoid accidental in-place modification.
         return list(self._codes)
 
-    def load(self) -> list[CodeEntry]:
-        """Backward-compatible alias for `get_codes()`.
+    def get_active_codes(self, *, now: datetime | None = None) -> list[CodeEntry]:
+        now = now or self._now()
+        return [entry for entry in self.get_codes() if entry.end >= now]
 
-        Kept for existing callers; prefer `get_codes()` in new code.
-        """
+    def load(self) -> list[CodeEntry]:
         return self.get_codes()
 
     def save(self, codes: list[CodeEntry]) -> None:
-        """Persist codes to disk in JSON format and update in-memory cache."""
-        self._codes = list(codes)
+        ordered = sorted(list(codes), key=lambda entry: entry.start)
+        self._codes = ordered
         self._loaded = True
         self._save_to_disk(self._codes)
 
+    def merge_and_save(
+        self,
+        fresh_codes: Sequence[CodeEntry],
+        *,
+        now: datetime | None = None,
+    ) -> list[CodeEntry]:
+        now = now or self._now()
+        merged: dict[str, CodeEntry] = {entry.start_str: entry for entry in self.get_codes()}
+        for entry in fresh_codes:
+            merged[entry.start_str] = entry
+        active = [entry for entry in merged.values() if entry.end >= now]
+        active.sort(key=lambda entry: entry.start)
+        self.save(active)
+        return active
+
     def purge(self) -> None:
-        """Delete the cache file from disk and clear in-memory state."""
         self._codes = []
         self._loaded = True
-
         try:
             if self.cache_path is not None and self.cache_path.exists():
                 self.cache_path.unlink()
         except Exception:
-            # Ignore failures; cache will simply be considered empty.
             pass
 
-    # ------------------------------------------------------------------ #
-    # Refresh logic
-    # ------------------------------------------------------------------ #
-
     def refresh(self, url: str, *, use_network: bool = True) -> list[CodeEntry]:
-        """Fetch new codes, merge with cache, drop expired entries, save and return.
+        """Legacy compatibility wrapper.
 
-        - Existing cached codes are loaded (from memory or disk).
-        - If ``use_network`` is True, fresh codes from the remote URL are fetched
-          and merged by ``start_str``.
-        - Codes whose ``end`` timestamp is earlier than "now" in ``self.tz""
-          are discarded.
+        New callers should use :class:`fc_token.core.refresh.RefreshService`.
         """
-        # Index existing codes by their canonical start timestamp string.
-        existing: dict[str, CodeEntry] = {c.start_str: c for c in self.get_codes()}
+        if not use_network:
+            active = self.get_active_codes(now=self._now())
+            self.save(active)
+            return active
 
-        # Clear scrape metadata for this refresh.
-        self.last_identity_used = None
-        self.last_scrape_raw_bytes = None
-        self.last_scraped_codes_count = 0
+        from .core.source import ActivationSourceClient
 
-        fresh: list[CodeEntry] = []
-        if use_network:
-            try:
-                fresh, identity, raw_bytes = fetch_codes_with_identity(url)
-                self.last_identity_used = identity
-                self.last_scrape_raw_bytes = int(raw_bytes)
-                self.last_scraped_codes_count = len(fresh)
-            except Exception:
-                # Network / parsing errors -> treat as "no new codes".
-                fresh = []
-
-        for entry in fresh:
-            existing[entry.start_str] = entry
-
-        now_utc = self._now()
-        active = [c for c in existing.values() if c.end >= now_utc]
-
-        # Keep entries ordered by start time for predictable behaviour.
-        active.sort(key=lambda c: c.start)
-
-        self.save(active)
-        return active
+        result = ActivationSourceClient().fetch_codes(url)
+        self.last_identity_used = result.identity_label
+        self.last_scrape_raw_bytes = result.raw_bytes
+        self.last_scraped_codes_count = len(result.codes)
+        return self.merge_and_save(result.codes, now=result.fetched_at_utc)
 
     def _now(self) -> datetime:
-        """Return the current datetime in the configured timezone."""
         return datetime.now(self.tz)

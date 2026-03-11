@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import QApplication
 
 from fc_token.cache import CodeCache
 from fc_token.config import APP_NAME, APP_VERSION, DESKTOP_FILENAME
-from fc_token.core.refresh import RefreshPolicy, RefreshService
 from fc_token.icons import load_app_icon
 from fc_token.ui.main_window import MainWindow
 from fc_token.ui.tray import TrayController
@@ -64,9 +63,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 app.setDesktopFileName(Path(DESKTOP_FILENAME).stem)
 
             cache = CodeCache()
-            refresh_service = RefreshService(cache, policy=RefreshPolicy())
             win = MainWindow(cache)
-            tray = TrayController(win, cache, refresh_service)
+            tray = TrayController(win, cache)
             win.set_tray_controller(tray)
 
             # For self-test, we don't need to show the main window.
@@ -89,9 +87,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         app.setDesktopFileName(Path(DESKTOP_FILENAME).stem)
 
     cache = CodeCache()
-    refresh_service = RefreshService(cache, policy=RefreshPolicy())
     win = MainWindow(cache)
-    tray = TrayController(win, cache, refresh_service)
+    tray = TrayController(win, cache)
     win.set_tray_controller(tray)
 
     # Honour the user's "open main window on start" preference.

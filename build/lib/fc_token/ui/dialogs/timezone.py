@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 )
 
 from fc_token.config import DEFAULT_TIMEZONE
-from fc_token.timezone_utils import get_timezone_dialog_state
+from fc_token.ui.utils import get_local_zone_name
 
 # Cache the full timezone list once at import time to avoid repeated
 # calls to available_timezones() each time the dialog is opened.
@@ -24,9 +24,7 @@ def run_timezone_dialog(parent: QWidget | None = None) -> str | None:
 
     Returns the selected timezone name (IANA string) or None if cancelled.
     """
-    dialog_state = get_timezone_dialog_state(DEFAULT_TIMEZONE)
-    current_tz_name = dialog_state.current_display_name
-    current_tz_key = dialog_state.preselected_key
+    current_tz_name = get_local_zone_name(DEFAULT_TIMEZONE)
 
     # Use the cached global list
     all_tzs = ALL_TIMEZONES
@@ -39,18 +37,16 @@ def run_timezone_dialog(parent: QWidget | None = None) -> str | None:
     layout.addWidget(label)
 
     combo = QComboBox(dlg)
-    if dialog_state.placeholder_label is not None:
-        combo.addItem(dialog_state.placeholder_label, userData=None)
-    for tz_name in all_tzs:
-        combo.addItem(tz_name, userData=tz_name)
+    combo.addItems(all_tzs)
 
-    # Preselect current tz if present; otherwise leave the non-persistable
-    # placeholder selected so an unchanged confirmation does not rewrite the
-    # user's timezone setting.
-    if current_tz_key is not None:
-        target_index = combo.findData(current_tz_key)
-        if target_index >= 0:
-            combo.setCurrentIndex(target_index)
+    # Preselect current tz if present
+    try:
+        idx = all_tzs.index(current_tz_name)
+    except ValueError:
+        idx = -1
+
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
 
     layout.addWidget(combo)
 
@@ -65,8 +61,4 @@ def run_timezone_dialog(parent: QWidget | None = None) -> str | None:
     if dlg.exec() != QDialog.DialogCode.Accepted:
         return None
 
-    selected_tz = combo.currentData()
-    if not isinstance(selected_tz, str) or not selected_tz:
-        return None
-
-    return selected_tz
+    return combo.currentText()

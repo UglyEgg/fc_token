@@ -7,6 +7,7 @@ then exposes small convenience wrappers for display and conversion callers.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
@@ -20,6 +21,13 @@ _ZONEINFO_ROOT = Path("/usr/share/zoneinfo")
 _LOCALTIME_PATH = Path("/etc/localtime")
 _TIMEZONE_FILE_PATH = Path("/etc/timezone")
 _FALLBACK_TZ_NAME = "UTC"
+
+logger = logging.getLogger(__name__)
+
+
+def _log_lookup_failure(context: str) -> None:
+    """Emit a debug log for non-fatal timezone lookup failures."""
+    logger.debug("Timezone resolution fell back during %s", context, exc_info=True)
 
 
 class TimezoneSource(str, Enum):
@@ -43,6 +51,15 @@ class ResolvedTimezone:
     source: TimezoneSource
 
 
+@dataclass(frozen=True, slots=True)
+class TimezoneDialogState:
+    """Dialog-facing state for timezone selection flows."""
+
+    current_display_name: str
+    preselected_key: str | None
+    placeholder_label: str | None
+
+
 def _load_zone(name: str | None) -> ZoneInfo | None:
     """Return a ZoneInfo for a valid IANA timezone name."""
     if not name:
@@ -50,6 +67,7 @@ def _load_zone(name: str | None) -> ZoneInfo | None:
     try:
         return ZoneInfo(name)
     except Exception:
+        _log_lookup_failure(f"loading timezone {name!r}")
         return None
 
 
@@ -58,12 +76,14 @@ def _read_saved_zone_name() -> str | None:
     try:
         from PyQt6.QtCore import QSettings
     except Exception:
+        _log_lookup_failure("importing QSettings")
         return None
 
     try:
         settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         value = settings.value(KEY_TIMEZONE, "", type=str)
     except Exception:
+        _log_lookup_failure("reading saved timezone")
         return None
     return value or None
 
@@ -73,8 +93,13 @@ def _read_env_zone_name() -> str | None:
 
     This intentionally supports only IANA zone names that can be loaded by
     ZoneInfo. Full POSIX TZ expression parsing is out of scope here.
+    Leading and trailing whitespace is ignored.
     """
-    return os.environ.get("TZ") or os.environ.get("TIMEZONE") or None
+    value = os.environ.get("TZ") or os.environ.get("TIMEZONE")
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _read_system_zone_name_from_localtime() -> str | None:
@@ -82,11 +107,13 @@ def _read_system_zone_name_from_localtime() -> str | None:
     try:
         resolved = _LOCALTIME_PATH.resolve(strict=True)
     except Exception:
+        _log_lookup_failure("resolving /etc/localtime")
         return None
 
     try:
         relative = resolved.relative_to(_ZONEINFO_ROOT)
     except Exception:
+        _log_lookup_failure("mapping /etc/localtime into zoneinfo root")
         return None
 
     zone_name = relative.as_posix()
@@ -98,6 +125,7 @@ def _read_system_zone_name_from_file() -> str | None:
     try:
         value = _TIMEZONE_FILE_PATH.read_text(encoding="utf-8").strip()
     except Exception:
+        _log_lookup_failure("reading /etc/timezone")
         return None
     return value or None
 
@@ -118,6 +146,7 @@ def _read_system_zone_fallback() -> tzinfo | None:
     try:
         return datetime.now().astimezone().tzinfo
     except Exception:
+        _log_lookup_failure("reading system local tzinfo fallback")
         return None
 
 
@@ -129,6 +158,7 @@ def _display_name_for_zone(value: tzinfo, canonical_name: str | None) -> str:
     try:
         name = datetime.now(value).tzname()
     except Exception:
+        _log_lookup_failure("deriving timezone display name")
         name = None
     if isinstance(name, str) and name:
         return name
@@ -190,6 +220,29 @@ def resolve_local_timezone(default_tz_name: str) -> ResolvedTimezone:
     )
 
 
+def get_timezone_dialog_state(default_tz_name: str) -> TimezoneDialogState:
+    """Return dialog-specific timezone selection state.
+
+    When the resolved timezone has no canonical IANA key, the dialog should
+    show the current local label without preselecting a persistable timezone.
+    That prevents an unchanged confirmation click from saving the default zone
+    as though the user explicitly chose it.
+    """
+    resolved = resolve_local_timezone(default_tz_name)
+    if resolved.canonical_name:
+        return TimezoneDialogState(
+            current_display_name=resolved.display_name,
+            preselected_key=resolved.canonical_name,
+            placeholder_label=None,
+        )
+
+    return TimezoneDialogState(
+        current_display_name=resolved.display_name,
+        preselected_key=None,
+        placeholder_label=f"System local ({resolved.display_name})",
+    )
+
+
 def get_local_zone(default_tz_name: str) -> tzinfo:
     """Return the resolved tzinfo used for local-time display and conversion."""
     return resolve_local_timezone(default_tz_name).tzinfo
@@ -200,24 +253,18 @@ def get_local_zone_name(default_tz_name: str) -> str:
     return resolve_local_timezone(default_tz_name).display_name
 
 
-def get_local_zone_key(default_tz_name: str) -> str:
-    """Return an IANA timezone key suitable for settings and combo preselection."""
-    resolved = resolve_local_timezone(default_tz_name)
-    if resolved.canonical_name:
-        return resolved.canonical_name
-
-    default_zone = _load_zone(default_tz_name)
-    if default_zone is not None:
-        return default_tz_name
-
-    return _FALLBACK_TZ_NAME
+def get_local_zone_key(default_tz_name: str) -> str | None:
+    """Return the resolved IANA timezone key, if one is available."""
+    return resolve_local_timezone(default_tz_name).canonical_name
 
 
 __all__ = [
     "ResolvedTimezone",
+    "TimezoneDialogState",
     "TimezoneSource",
     "get_local_zone",
     "get_local_zone_key",
     "get_local_zone_name",
+    "get_timezone_dialog_state",
     "resolve_local_timezone",
 ]

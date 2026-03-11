@@ -58,7 +58,7 @@ class TimezoneUtilsTests(unittest.TestCase):
         self.assertEqual(resolved.display_name, "UTC-06")
         self.assertIsNone(resolved.canonical_name)
         self.assertEqual(resolved.source, tz_utils.TimezoneSource.SYSTEM_FALLBACK)
-        self.assertEqual(zone_key, "UTC")
+        self.assertIsNone(zone_key)
 
     def test_default_timezone_used_when_no_other_source_resolves(self) -> None:
         with patch.object(tz_utils, "_read_saved_zone_name", return_value=None):
@@ -85,6 +85,10 @@ class TimezoneUtilsTests(unittest.TestCase):
 
     def test_env_reads_tz_before_timezone(self) -> None:
         with patch.dict(os.environ, {"TZ": "America/Chicago", "TIMEZONE": "Asia/Tokyo"}, clear=True):
+            self.assertEqual(tz_utils._read_env_zone_name(), "America/Chicago")
+
+    def test_env_timezone_value_is_trimmed(self) -> None:
+        with patch.dict(os.environ, {"TZ": "  America/Chicago  "}, clear=True):
             self.assertEqual(tz_utils._read_env_zone_name(), "America/Chicago")
 
     def test_system_zone_name_from_localtime_uses_zoneinfo_path(self) -> None:
@@ -114,6 +118,43 @@ class TimezoneUtilsTests(unittest.TestCase):
         with patch.object(tz_utils, "resolve_local_timezone", return_value=resolved):
             self.assertEqual(tz_utils.get_local_zone_key("UTC"), "America/Chicago")
 
+    def test_get_local_zone_key_returns_none_for_noncanonical_system_fallback(self) -> None:
+        resolved = tz_utils.ResolvedTimezone(
+            tzinfo=timezone(timedelta(hours=-6), name="UTC-06"),
+            display_name="UTC-06",
+            canonical_name=None,
+            source=tz_utils.TimezoneSource.SYSTEM_FALLBACK,
+        )
+        with patch.object(tz_utils, "resolve_local_timezone", return_value=resolved):
+            self.assertIsNone(tz_utils.get_local_zone_key("UTC"))
+
+    def test_timezone_dialog_state_requires_explicit_selection_for_noncanonical_zone(self) -> None:
+        resolved = tz_utils.ResolvedTimezone(
+            tzinfo=timezone(timedelta(hours=-6), name="UTC-06"),
+            display_name="UTC-06",
+            canonical_name=None,
+            source=tz_utils.TimezoneSource.SYSTEM_FALLBACK,
+        )
+        with patch.object(tz_utils, "resolve_local_timezone", return_value=resolved):
+            state = tz_utils.get_timezone_dialog_state("UTC")
+
+        self.assertEqual(state.current_display_name, "UTC-06")
+        self.assertIsNone(state.preselected_key)
+        self.assertEqual(state.placeholder_label, "System local (UTC-06)")
+
+    def test_timezone_dialog_state_preselects_canonical_zone(self) -> None:
+        resolved = tz_utils.ResolvedTimezone(
+            tzinfo=ZoneInfo("America/Chicago"),
+            display_name="America/Chicago",
+            canonical_name="America/Chicago",
+            source=tz_utils.TimezoneSource.SYSTEM,
+        )
+        with patch.object(tz_utils, "resolve_local_timezone", return_value=resolved):
+            state = tz_utils.get_timezone_dialog_state("UTC")
+
+        self.assertEqual(state.current_display_name, "America/Chicago")
+        self.assertEqual(state.preselected_key, "America/Chicago")
+        self.assertIsNone(state.placeholder_label)
 
 
 if __name__ == "__main__":

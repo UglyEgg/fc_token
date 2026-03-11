@@ -1,22 +1,17 @@
-"""Scraping and parsing File Centipede activation codes.
+"""Parsing helpers for File Centipede activation codes.
 
-Refactored to:
-- Keep the original parsing logic and UTC semantics.
-- Use a small pool of realistic browser User-Agent strings for requests.
-- Optionally reuse a module-level `requests.Session` for connection reuse.
+This module intentionally focuses on parsing and code selection. Network access
+lives in ``fc_token.core.source`` so the refresh engine can be reused by other
+front ends without dragging Qt or tray logic into the core.
 """
 
 from __future__ import annotations
 
-import random
 import re
 from datetime import datetime, tzinfo
-from typing import Any, List
 from zoneinfo import ZoneInfo
 
-import requests
-
-from .config import DEFAULT_CODES_URL, BROWSER_IDENTITIES, FILE_CENTIPEDE_TIMEZONE
+from .config import DEFAULT_CODES_URL, FILE_CENTIPEDE_TIMEZONE
 from .models import CodeEntry, UTC
 
 # Activation codes appear to use a URL-safe Base64-like alphabet:
@@ -29,36 +24,6 @@ DATE_RE = re.compile(
     r"\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*-\s*"
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
 )
-
-# Small pool of realistic desktop browser User-Agent strings.
-USER_AGENTS: List[str] = [
-    # Chrome, Linux
-    (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    # Chrome, Windows
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    # Firefox, Linux
-    (
-        "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) "
-        "Gecko/20100101 Firefox/125.0"
-    ),
-    # Firefox, Windows
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) "
-        "Gecko/20100101 Firefox/125.0"
-    ),
-    # Edge, Windows
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
-    ),
-]
-
 
 _SOURCE_TIMEZONE: tzinfo | None = None
 _SOURCE_TIMEZONE_NAME: str | None = None
@@ -90,114 +55,70 @@ def refresh_source_timezone() -> tzinfo:
     return _get_source_timezone()
 
 
-def _get_random_user_agent() -> str:
-    """Return a random realistic browser User-Agent string."""
-    return random.choice(USER_AGENTS)
-
-
-# Optional module-level session for connection reuse.
-_SESSION = requests.Session()
-_SESSION.headers.update(
-    {
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-)
-
-
-def _get_session() -> requests.Session:
-    """Return the shared requests session used for scraping."""
-    return _SESSION
-
-
 def clean_token(raw: str) -> str:
-    """Extract the actual activation token from a noisy string.
-
-    The page sometimes includes trailing HTML/JS after the token. This function
-    returns the first long run of valid token characters, or a stripped version
-    of the input if no such run is found.
-    """
-    m = TOKEN_RE.search(raw)
-    return m.group(0) if m else raw.strip()
+    """Extract the actual activation token from a noisy string."""
+    match = TOKEN_RE.search(raw)
+    return match.group(0) if match else raw.strip()
 
 
 def _parse_datetime(value: str, *, tz: tzinfo) -> datetime:
-    """Parse a timestamp string from the page into an aware datetime.
-
-    The source timestamps are assumed to be in the provided timezone.
-    """
+    """Parse a source timestamp string into an aware datetime."""
     dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
     return dt.replace(tzinfo=tz)
 
 
 def _parse_codes_with_timezone(html: str, tz: tzinfo) -> list[CodeEntry]:
-    """Parse activation codes from HTML using the specified source timezone."""
+    """Parse activation codes from page text using the specified source timezone."""
     lines = html.splitlines()
     codes: list[CodeEntry] = []
 
-    i = 0
-    n = len(lines)
-
-    while i < n:
-        line = lines[i]
-        m = DATE_RE.match(line)
-        if not m:
-            i += 1
+    index = 0
+    total_lines = len(lines)
+    while index < total_lines:
+        line = lines[index]
+        match = DATE_RE.match(line)
+        if not match:
+            index += 1
             continue
 
-        start_str, end_str = m.groups()
+        start_str, end_str = match.groups()
 
-        # Find the first non-empty line after the date range as the start of the code.
-        j = i + 1
-        while j < n and not lines[j].strip():
-            j += 1
-        if j >= n:
+        code_index = index + 1
+        while code_index < total_lines and not lines[code_index].strip():
+            code_index += 1
+        if code_index >= total_lines:
             break
 
-        code_line = lines[j].strip()
-        k = j + 1
-
-        # Some codes may break across lines; concatenate until the next date range
-        # or a blank line immediately preceding one.
-        while k < n:
-            next_line = lines[k].strip()
+        code_line = lines[code_index].strip()
+        next_index = code_index + 1
+        while next_index < total_lines:
+            next_line = lines[next_index].strip()
             if DATE_RE.match(next_line):
                 break
             if next_line:
                 code_line += next_line
-            k += 1
+            next_index += 1
 
         code = clean_token(code_line)
         try:
             start = _parse_datetime(start_str, tz=tz).astimezone(UTC)
             end = _parse_datetime(end_str, tz=tz).astimezone(UTC)
         except ValueError:
-            # Skip malformed date ranges but continue scanning.
-            i = k
+            index = next_index
             continue
 
         codes.append(CodeEntry(start=start, end=end, code=code))
-        i = k
+        index = next_index
 
-    # Keep entries ordered by start time for predictable behaviour.
-    codes.sort(key=lambda c: c.start)
+    codes.sort(key=lambda entry: entry.start)
     return codes
 
 
 def parse_codes(html: str, *, tz: tzinfo | None = None) -> list[CodeEntry]:
     """Parse activation codes from the HTML page text.
 
-    The page uses blocks of the form:
-
-        2024-01-01 00:00:00 - 2024-02-01 00:00:00
-        <one or more lines containing the activation code>
-
-    Codes may span multiple lines; non-empty lines following the date range
-    are concatenated until the next date range or end of input. Parsed
-    timestamps are converted to UTC for internal storage.
-
-    When no timezone is provided, the configured File Centipede source
-    timezone is treated as authoritative.
+    When ``tz`` is omitted, the configured File Centipede source timezone is
+    treated as authoritative.
     """
     effective_tz = tz if tz is not None else _get_source_timezone()
     return _parse_codes_with_timezone(html, effective_tz)
@@ -206,57 +127,33 @@ def parse_codes(html: str, *, tz: tzinfo | None = None) -> list[CodeEntry]:
 def fetch_codes(
     url: str = DEFAULT_CODES_URL, *, tz: tzinfo | None = None
 ) -> list[CodeEntry]:
-    """Download and parse activation codes from the File Centipede site.
+    """Backward-compatible helper that fetches codes via the core source client."""
+    from .core.source import ActivationSourceClient
 
-    Raises:
-        requests.RequestException: if the HTTP request fails.
-    """
-    headers = {"User-Agent": _get_random_user_agent()}
-    resp = _get_session().get(url, headers=headers, timeout=15)
-    resp.raise_for_status()
-    return parse_codes(resp.text, tz=tz)
-
-
-def _choose_identity() -> tuple[str, str]:
-    """Return (identity_label, user_agent) chosen from configured identities.
-
-    Uses the BROWSER_IDENTITIES list from fc_token.config so that
-    browser strings can be updated centrally without touching the
-    scraper logic.
-    """
-    return random.choice(BROWSER_IDENTITIES)
+    result = ActivationSourceClient().fetch_codes(url)
+    if tz is None:
+        return result.codes
+    return parse_codes(result.raw_text, tz=tz)
 
 
 def fetch_codes_with_identity(
     url: str = DEFAULT_CODES_URL, *, tz: tzinfo | None = None
 ) -> tuple[list[CodeEntry], str, int]:
-    """Download and parse codes, returning (codes, identity_label, bytes_scraped).
+    """Backward-compatible helper returning (codes, identity_label, bytes_scraped)."""
+    from .core.source import ActivationSourceClient
 
-    bytes_scraped is the size of the HTTP response body in bytes.
-    """
-    identity_label, user_agent = _choose_identity()
-    headers = {"User-Agent": user_agent}
-    resp = _get_session().get(url, headers=headers, timeout=15)
-    resp.raise_for_status()
-
-    body_bytes = len(resp.content or b"")
-    codes = parse_codes(resp.text, tz=tz)
-    return codes, identity_label, body_bytes
+    result = ActivationSourceClient().fetch_codes(url)
+    codes = result.codes if tz is None else parse_codes(result.raw_text, tz=tz)
+    return codes, result.identity_label, result.raw_bytes
 
 
 def get_code_for_date(target: datetime, codes: list[CodeEntry]) -> str | None:
-    """Return the activation code valid at the given datetime, if any.
-
-    `target` may be naive (treated as UTC) or timezone-aware (converted to UTC).
-    The first matching entry in `codes` is returned; if none match, `None`
-    is returned.
-    """
+    """Return the activation code valid at the given datetime, if any."""
     if target.tzinfo is None:
         target = target.replace(tzinfo=UTC)
     else:
         target = target.astimezone(UTC)
 
-    # `codes` are typically sorted by `start`, but we don't strictly rely on it.
     for entry in codes:
         if entry.contains(target):
             return entry.code
