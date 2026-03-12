@@ -44,7 +44,7 @@ from fc_token.desktop_entry import build_launcher_desktop
 
 
 ICON_PNG_NAME = "fc_token.png"
-ICON_SYMBOLIC_NAME = "fc_token_symbolic.svg"
+ICON_SYMBOLIC_NAME = "fc_token-symbolic.svg"
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,9 +201,7 @@ def target_from_args(args: argparse.Namespace) -> InstallTarget:
         # Default: user-local
         data_home_env = os.environ.get("XDG_DATA_HOME")
         base = (
-            Path(data_home_env)
-            if data_home_env
-            else Path.home() / ".local" / "share"
+            Path(data_home_env) if data_home_env else Path.home() / ".local" / "share"
         )
         return InstallTarget(prefix=base)
 

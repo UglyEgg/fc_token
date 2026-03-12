@@ -44,7 +44,13 @@ from fc_token.ui.dialogs.about import show_about_dialog
 from fc_token.ui.dialogs.timezone import run_timezone_dialog
 from fc_token.ui.dialogs.settings import run_settings_dialog
 from fc_token.ui.dialogs.sqlite_explorer import show_sqlite_explorer_dialog
-from fc_token.core.refresh import RefreshOutcome, RefreshService, RefreshState, RefreshStateKind, RefreshTrigger
+from fc_token.core.refresh import (
+    RefreshOutcome,
+    RefreshService,
+    RefreshState,
+    RefreshStateKind,
+    RefreshTrigger,
+)
 from fc_token.timezone_utils import resolve_local_timezone
 from fc_token.ui.workers import RefreshWorker
 from fc_token.scraper import refresh_source_timezone
@@ -58,12 +64,15 @@ AUTO_REFRESH_MINUTES = 24 * 60
 
 # Resource filenames packaged under fc_token/resources
 ICON_PNG_NAME = "fc_token.png"
-ICON_SYMBOLIC_NAME = "fc_token_symbolic.svg"
+ICON_SYMBOLIC_NAME = "fc_token-symbolic.svg"
+
 
 class TrayController:
     """System tray integration, scheduling, notifications, and dev tooling."""
 
-    def __init__(self, window, cache: CodeCache, refresh_service: RefreshService) -> None:
+    def __init__(
+        self, window, cache: CodeCache, refresh_service: RefreshService
+    ) -> None:
         self.window = window
         self.cache = cache
         self.refresh_service = refresh_service
@@ -1068,7 +1077,8 @@ class TrayController:
         if outcome.state.last_error:
             title = (
                 "Refresh failed"
-                if outcome.state.kind in {RefreshStateKind.NETWORK_FAILED, RefreshStateKind.PARSE_FAILED}
+                if outcome.state.kind
+                in {RefreshStateKind.NETWORK_FAILED, RefreshStateKind.PARSE_FAILED}
                 else "Using cached activation codes"
             )
             self.tray_icon.showMessage(
